@@ -145,10 +145,10 @@ public class InternalHealthServiceImpl implements HealthService {
 
     private CheckItemDTO checkSheets() {
         boolean conn = sheetsService.isConnected();
-        return item("Google Sheets", conn ? "OK" : "WARN",
+        return item("Database (PostgreSQL)", conn ? "OK" : "FAIL",
                 conn ? "Connected — " + sheetsService.getSheetUrl()
-                     : "Not connected — configure sheets.sheet-id",
-                conn ? "CONNECTED" : "DISABLED");
+                     : "Not connected — check datasource config",
+                conn ? "CONNECTED" : "DOWN");
     }
 
     private CheckItemDTO checkTelegram() {

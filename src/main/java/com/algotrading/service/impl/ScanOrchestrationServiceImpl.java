@@ -198,7 +198,7 @@ public class ScanOrchestrationServiceImpl implements ScanOrchestrationService {
         System.out.printf("  Worst Trade : ₹%+.2f%n", s.getWorstTrade());
         System.out.printf("  Circuit     : %s%n", s.isCircuitTripped() ? "TRIPPED ❌" : "CLEAR ✅");
         if (sheetsService.isConnected())
-            System.out.printf("  Sheet       : %s%n", sheetsService.getSheetUrl());
+            System.out.printf("  Database    : %s%n", sheetsService.getSheetUrl());
         System.out.println(sep + "\n");
     }
 }

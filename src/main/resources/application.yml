@@ -8,6 +8,23 @@ spring:
     serialization:
       write-dates-as-timestamps: false
 
+  # ── PostgreSQL Database ──────────────────────────────────────
+  datasource:
+    url: jdbc:postgresql://localhost:5432/algo_trading
+    username: postgres
+    password: postgres
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
 # ── Application Settings ──────────────────────────────────────
 app:
   symbols: RELIANCE,TCS,INFY,HDFCBANK,ICICIBANK,AXISBANK,WIPRO,SBIN
@@ -34,18 +51,12 @@ risk:
 broker:
   slippage-pct: 0.02            # 0.02% price slippage on fills
 
-# ── Google Sheets ─────────────────────────────────────────────
-# Setup:
-#   1. Go to https://console.cloud.google.com
-#   2. Enable Google Sheets API + Google Drive API
-#   3. Create Service Account → Add Role: Editor → Keys → JSON → Download
-#   4. Create a Google Sheet. Copy the Sheet ID from the URL:
-#      https://docs.google.com/spreadsheets/d/<<<THIS_PART>>>/edit
-#   5. Share the sheet with the service account email (Editor access)
-#   6. Paste values below:
-sheets:
-  sheet-id: <pass>
-  service-account-file: /resources/service_account.json
+# ── Database ──────────────────────────────────────────────────
+# Trade data is persisted to PostgreSQL (see spring.datasource above).
+# To set up:
+#   1. Install PostgreSQL
+#   2. CREATE DATABASE algo_trading;
+#   3. Tables are auto-created by Flyway on startup
 
 # ── Telegram Notifications ────────────────────────────────────
 # Setup:

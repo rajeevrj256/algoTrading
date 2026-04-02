@@ -11,7 +11,7 @@ import org.springframework.web.bind.annotation.*;
 import java.util.List;
 
 /**
- * SheetsController — REST API for Google Sheets operations.
+ * SheetsController — REST API for trade data persistence.
  *
  * POST /api/sheets/trade
  * POST /api/sheets/open-positions
@@ -29,7 +29,7 @@ public class SheetsController {
     @PostMapping("/trade")
     public ResponseEntity<ApiResponse<String>> logTrade(@RequestBody PositionDTO position) {
         sheetsService.logTrade(position);
-        return ResponseEntity.ok(ApiResponse.ok("Trade logged to Sheets"));
+        return ResponseEntity.ok(ApiResponse.ok("Trade logged to database"));
     }
 
     @PostMapping("/open-positions")
@@ -48,7 +48,7 @@ public class SheetsController {
     public ResponseEntity<ApiResponse<String>> status() {
         boolean conn = sheetsService.isConnected();
         String msg = conn ? "Connected — " + sheetsService.getSheetUrl()
-                          : "NOT connected — configure sheets.sheet-id in application.yml";
+                          : "NOT connected — check PostgreSQL datasource in application.yml";
         return ResponseEntity.ok(conn ? ApiResponse.ok(msg) : ApiResponse.error(msg));
     }
 }
