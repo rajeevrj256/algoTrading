@@ -1,0 +1,81 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: algo-trading-monolith
+  jackson:
+    serialization:
+      write-dates-as-timestamps: false
+
+# ── Application Settings ──────────────────────────────────────
+app:
+  symbols: RELIANCE,TCS,INFY,HDFCBANK,ICICIBANK,AXISBANK,WIPRO,SBIN
+  candle-count: 120
+  scan-interval-ms: 300000        # 5 minutes
+  scan-initial-delay-ms: 5000     # wait 5s after startup
+
+# ── Data Feed ─────────────────────────────────────────────────
+datafeed:
+  cache:
+    ttl-seconds: 60
+
+# ── Risk Management ───────────────────────────────────────────
+risk:
+  capital: 100000               # ₹1,00,000 trading capital
+  daily-target: 1000            # Stop trading after ₹1,000 profit
+  daily-max-loss: 500           # Circuit breaker at ₹500 loss
+  max-trades-per-day: 10
+  min-confidence: 0.60
+  min-rr-ratio: 1.5
+  risk-per-trade-pct: 0.2       # 0.2% of capital per trade
+
+# ── Paper Broker ──────────────────────────────────────────────
+broker:
+  slippage-pct: 0.02            # 0.02% price slippage on fills
+
+# ── Google Sheets ─────────────────────────────────────────────
+# Setup:
+#   1. Go to https://console.cloud.google.com
+#   2. Enable Google Sheets API + Google Drive API
+#   3. Create Service Account → Add Role: Editor → Keys → JSON → Download
+#   4. Create a Google Sheet. Copy the Sheet ID from the URL:
+#      https://docs.google.com/spreadsheets/d/<<<THIS_PART>>>/edit
+#   5. Share the sheet with the service account email (Editor access)
+#   6. Paste values below:
+sheets:
+  sheet-id: <pass>
+  service-account-file: /resources/service_account.json
+
+# ── Telegram Notifications ────────────────────────────────────
+# Setup:
+#   1. Message @BotFather on Telegram → /newbot → copy BOT_TOKEN
+#   2. Start a chat with your bot
+#   3. Call: https://api.telegram.org/bot<TOKEN>/getUpdates → find your chat_id
+#   4. Paste values below:
+notification:
+  telegram:
+    bot-token: ""               # e.g. 123456789:ABCdef...
+    chat-id:   ""               # e.g. -1001234567890
+
+# ── Health Checks ─────────────────────────────────────────────
+health:
+  check-interval-ms: 900000     # 15 minutes
+
+# ── Actuator ─────────────────────────────────────────────────
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
+
+# ── Logging ───────────────────────────────────────────────────
+logging:
+  level:
+    com.algotrading: DEBUG
+    root: INFO
+  pattern:
+    console: "%d{HH:mm:ss} | %-8level | %msg%n"
