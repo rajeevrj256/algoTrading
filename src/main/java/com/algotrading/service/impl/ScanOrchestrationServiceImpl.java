@@ -2,6 +2,7 @@ package com.algotrading.service.impl;
 
 import com.algotrading.dto.*;
 import com.algotrading.enums.AlertType;
+import com.algotrading.event.TradingEventPublisher;
 import com.algotrading.service.*;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -22,12 +23,15 @@ import static org.apache.logging.log4j.util.Strings.repeat;
  * The main trading loop called by the scheduler every 5 minutes.
  * Orchestrates all services in sequence:
  *
- *   DataFeedService  → fetch candles
- *   StrategyService  → generate signal
- *   RiskService      → validate signal + system gate
- *   BrokerService    → open / check-exit positions
- *   SheetsService    → log trades and refresh open-positions tab
- *   NotificationService → send alerts
+ *   CRITICAL (synchronous):
+ *     DataFeedService  → fetch candles
+ *     StrategyService  → generate signal
+ *     RiskService      → validate signal + system gate
+ *     BrokerService    → open / check-exit positions
+ *
+ *   NON-CRITICAL (async via Kafka):
+ *     SheetsService    → log trades and refresh open-positions tab
+ *     NotificationService → send alerts
  */
 @Slf4j
 @Service
@@ -36,12 +40,12 @@ public class ScanOrchestrationServiceImpl implements ScanOrchestrationService {
 
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
 
-    private final DataFeedService     dataFeedService;
-    private final StrategyService     strategyService;
-    private final RiskService         riskService;
-    private final BrokerService       brokerService;
-    private final SheetsService       sheetsService;
-    private final NotificationService notificationService;
+    private final DataFeedService       dataFeedService;
+    private final StrategyService       strategyService;
+    private final RiskService           riskService;
+    private final BrokerService         brokerService;
+    private final SheetsService         sheetsService;       // kept for printDailySummary() only
+    private final TradingEventPublisher eventPublisher;
 
     @Value("${app.symbols:RELIANCE,TCS,INFY,HDFCBANK,ICICIBANK,AXISBANK,WIPRO,SBIN}")
     private String symbolsStr;
@@ -74,8 +78,8 @@ public class ScanOrchestrationServiceImpl implements ScanOrchestrationService {
             }
         }
 
-        // Refresh open positions tab in Sheets
-        sheetsService.updateOpenPositions(brokerService.getOpenPositions());
+        // Refresh open positions tab (async via Kafka)
+        eventPublisher.publishOpenPositionsUpdate(brokerService.getOpenPositions());
         log.info("[Engine] ===== SCAN END =====");
     }
 
@@ -99,21 +103,21 @@ public class ScanOrchestrationServiceImpl implements ScanOrchestrationService {
 
                 if (closed != null) {
                     riskService.recordTrade(closed.getPnl());
-                    sheetsService.logTrade(closed);
-                    notificationService.notifyTradeClose(closed);
+                    eventPublisher.publishTradeLog(closed);
+                    eventPublisher.publishTradeCloseNotification(closed);
                 }
             }
         }
 
-        // Write daily summary
+        // Write daily summary (async via Kafka)
         DailySummaryDTO summary = riskService.getDailySummary();
-        sheetsService.updateDailySummary(summary);
+        eventPublisher.publishDailySummaryUpdate(summary);
 
-        // Clear open-positions tab
-        sheetsService.updateOpenPositions(Collections.emptyList());
+        // Clear open-positions tab (async via Kafka)
+        eventPublisher.publishOpenPositionsUpdate(Collections.emptyList());
 
-        // Send EOD summary alert
-        notificationService.sendAlert(AlertDTO.builder()
+        // Send EOD summary alert (async via Kafka)
+        eventPublisher.publishAlert(AlertDTO.builder()
                 .type(AlertType.DAILY_SUMMARY)
                 .title("Daily Summary")
                 .message(String.format("Trades: %d | P&L: ₹%.2f | Win Rate: %.0f%%",
@@ -134,8 +138,8 @@ public class ScanOrchestrationServiceImpl implements ScanOrchestrationService {
             List<PositionDTO> closed = brokerService.checkExits(symbol, lastPrice.get());
             for (PositionDTO c : closed) {
                 riskService.recordTrade(c.getPnl());
-                sheetsService.logTrade(c);
-                notificationService.notifyTradeClose(c);
+                eventPublisher.publishTradeLog(c);
+                eventPublisher.publishTradeCloseNotification(c);
                 log.info("[Engine] Exit — {} P&L=₹{} | {}", symbol,
                         String.format("%.2f", c.getPnl()), c.getExitReason());
             }
@@ -174,8 +178,8 @@ public class ScanOrchestrationServiceImpl implements ScanOrchestrationService {
         // 6. Execute via broker
         PositionDTO position = brokerService.openPosition(signal);
 
-        // 7. Notify and log
-        notificationService.notifyTradeOpen(position);
+        // 7. Notify (async via Kafka)
+        eventPublisher.publishTradeOpenNotification(position);
 
         log.info("[Engine] ✅ OPENED {} {} x{} @ ₹{} [{}] — {}",
                 signal.getSignal(), symbol, signal.getQuantity(),
