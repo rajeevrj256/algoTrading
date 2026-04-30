@@ -10,9 +10,8 @@ spring:
 
   # ── PostgreSQL Database ──────────────────────────────────────
   datasource:
-    url: jdbc:postgresql://ep-twilight-haze-a1t2g6eh.ap-southeast-1.aws.neon.tech:5432/neondb?sslmode=require
-    username: neondb_owner
-    password: npg_qK4o5DepPkxY
+    url:
+    username:
     driver-class-name: org.postgresql.Driver
   jpa:
     hibernate:
@@ -68,8 +67,8 @@ groww:
   base-url: https://api.groww.in
   api-version: "1.0"
   min-request-gap-ms: 150         # stay below Groww's per-second burst limits
-  api-key: "eyJraWQiOiJaTUtjVXciLCJhbGciOiJFUzI1NiJ9.eyJleHAiOjI1NjU5Mjk1MzYsImlhdCI6MTc3NzUyOTUzNiwibmJmIjoxNzc3NTI5NTM2LCJzdWIiOiJ7XCJ0b2tlblJlZklkXCI6XCJhMmZlYmM4Zi03Y2QwLTQ4NWEtOTc3My1kNTA2ZWIzZDcwNTFcIixcInZlbmRvckludGVncmF0aW9uS2V5XCI6XCJlMzFmZjIzYjA4NmI0MDZjODg3NGIyZjZkODQ5NTMxM1wiLFwidXNlckFjY291bnRJZFwiOlwiZDczNWVlZGMtMGUxYS00NjNkLTk5MmQtOWQ1MWYyZDcyZTc2XCIsXCJkZXZpY2VJZFwiOlwiZjhkODViNDEtNDVjNy01MTNmLWIzNGYtOWYzZDZkNTBkNmY5XCIsXCJzZXNzaW9uSWRcIjpcIjU5ZTRkYzRlLThiOTctNDdhNy1iNjY4LTQxOGNmOGZkNDdiZlwiLFwiYWRkaXRpb25hbERhdGFcIjpcIno1NC9NZzltdjE2WXdmb0gvS0EwYk1BSFptbHJqVEtDKzNYMWRpU21uOHBSTkczdTlLa2pWZDNoWjU1ZStNZERhWXBOVi9UOUxIRmtQejFFQisybTdRPT1cIixcInJvbGVcIjpcImF1dGgtdG90cFwiLFwic291cmNlSXBBZGRyZXNzXCI6XCIxMDMuMTYzLjY1LjE3MiwxNzIuNjguNzkuMTQxLDM1LjI0MS4yMy4xMjNcIixcInR3b0ZhRXhwaXJ5VHNcIjoyNTY1OTI5NTM2NjE1LFwidmVuZG9yTmFtZVwiOlwiZ3Jvd3dBcGlcIn0iLCJpc3MiOiJhcGV4LWF1dGgtcHJvZC1hcHAifQ.lgQEn5QXvikujgvEGvD76O7mvYGYzIxo0-5lZ0sWHK8Pjsaq2WTVgjmNxFMOvdHBJpfOz4xHaCAC9Sa5-jHLwQ"
-  api-secret: "aY@UoZob#oAD#E(9Z4zKLFU(g1l%*n)o"
+  api-key: ""
+  api-secret: ""
   # Optional: paste a manually-generated access token to skip the exchange flow.
   access-token: ""
 
@@ -116,8 +115,8 @@ charges:
 #   4. Paste values below:
 notification:
   telegram:
-    bot-token: "8699809887:AAEImsrIxSLAHRkMw8WCAHYoRY6Kp4Mh5Y0"
-    chat-id: "1169619987"          # e.g. -1001234567890
+    bot-token: ""
+    chat-id: ""          # e.g. -1001234567890
 
 # ── Health Checks ─────────────────────────────────────────────
 health:
