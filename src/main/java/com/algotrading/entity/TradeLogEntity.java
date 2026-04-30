@@ -28,6 +28,9 @@ public class TradeLogEntity {
     @Column(name = "trade_time")
     private LocalTime tradeTime;
 
+    @Column(name = "position_id")
+    private String positionId;
+
     @Column(nullable = false)
     private String symbol;
 
@@ -53,6 +56,8 @@ public class TradeLogEntity {
 
     @Column(name = "reward_amount")
     private double rewardAmount;
+
+    private double charges;
 
     private double pnl;
 

@@ -3,8 +3,12 @@ package com.algotrading.event;
 import com.algotrading.dto.AlertDTO;
 import com.algotrading.dto.DailySummaryDTO;
 import com.algotrading.dto.PositionDTO;
+import com.algotrading.service.NotificationService;
+import com.algotrading.service.SheetsService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
 
@@ -26,11 +30,20 @@ public class TradingEventPublisher {
     private static final String TOPIC_REPORTING     = "algotrading.trade-reporting";
     private static final String TOPIC_NOTIFICATIONS = "algotrading.trade-notifications";
 
-    private final KafkaTemplate<String, Object> kafkaTemplate;
+    @Value("${app.kafka.enabled:false}")
+    private boolean kafkaEnabled;
+
+    private final ObjectProvider<KafkaTemplate<String, Object>> kafkaTemplateProvider;
+    private final SheetsService sheetsService;
+    private final NotificationService notificationService;
 
     // ── Reporting events (→ SheetsService / PostgreSQL) ──────
 
     public void publishTradeLog(PositionDTO position) {
+        if (!shouldUseKafka()) {
+            sheetsService.logTrade(position);
+            return;
+        }
         TradeReportingEvent event = TradeReportingEvent.builder()
                 .type(TradeReportingType.LOG_TRADE)
                 .key(position.getSymbol())
@@ -41,6 +54,10 @@ public class TradingEventPublisher {
     }
 
     public void publishOpenPositionsUpdate(List<PositionDTO> positions) {
+        if (!shouldUseKafka()) {
+            sheetsService.updateOpenPositions(positions != null ? positions : Collections.emptyList());
+            return;
+        }
         TradeReportingEvent event = TradeReportingEvent.builder()
                 .type(TradeReportingType.UPDATE_OPEN_POSITIONS)
                 .key("SYSTEM")
@@ -51,6 +68,10 @@ public class TradingEventPublisher {
     }
 
     public void publishDailySummaryUpdate(DailySummaryDTO summary) {
+        if (!shouldUseKafka()) {
+            sheetsService.updateDailySummary(summary);
+            return;
+        }
         TradeReportingEvent event = TradeReportingEvent.builder()
                 .type(TradeReportingType.UPDATE_DAILY_SUMMARY)
                 .key("SYSTEM")
@@ -63,6 +84,10 @@ public class TradingEventPublisher {
     // ── Notification events (→ NotificationService / Telegram) ─
 
     public void publishTradeOpenNotification(PositionDTO position) {
+        if (!shouldUseKafka()) {
+            notificationService.notifyTradeOpen(position);
+            return;
+        }
         TradeNotificationEvent event = TradeNotificationEvent.builder()
                 .type(TradeNotificationType.TRADE_OPENED)
                 .key(position.getSymbol())
@@ -73,6 +98,10 @@ public class TradingEventPublisher {
     }
 
     public void publishTradeCloseNotification(PositionDTO position) {
+        if (!shouldUseKafka()) {
+            notificationService.notifyTradeClose(position);
+            return;
+        }
         TradeNotificationEvent event = TradeNotificationEvent.builder()
                 .type(TradeNotificationType.TRADE_CLOSED)
                 .key(position.getSymbol())
@@ -83,6 +112,10 @@ public class TradingEventPublisher {
     }
 
     public void publishAlert(AlertDTO alert) {
+        if (!shouldUseKafka()) {
+            notificationService.sendAlert(alert);
+            return;
+        }
         TradeNotificationEvent event = TradeNotificationEvent.builder()
                 .type(TradeNotificationType.ALERT)
                 .key(alert.getSymbol() != null ? alert.getSymbol() : "SYSTEM")
@@ -95,10 +128,19 @@ public class TradingEventPublisher {
     // ── Internal ─────────────────────────────────────────────
 
     private void send(String topic, String key, Object event) {
+        KafkaTemplate<String, Object> kafkaTemplate = kafkaTemplateProvider.getIfAvailable();
+        if (kafkaTemplate == null) {
+            log.warn("[Kafka] Kafka is enabled but no KafkaTemplate is available. Falling back is skipped for {}", topic);
+            return;
+        }
         kafkaTemplate.send(topic, key, event)
                 .addCallback(
                         result -> log.debug("[Kafka] Sent to {} key={}", topic, key),
                         ex -> log.error("[Kafka] FAILED to send to {} key={}: {}", topic, key, ex.getMessage())
                 );
+    }
+
+    private boolean shouldUseKafka() {
+        return kafkaEnabled && kafkaTemplateProvider.getIfAvailable() != null;
     }
 }

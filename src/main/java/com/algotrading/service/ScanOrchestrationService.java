@@ -13,6 +13,9 @@ public interface ScanOrchestrationService {
     /** Run a full market scan for all configured symbols. */
     void runScan();
 
+    /** Check only open positions for stop-loss / target exits. */
+    void runExitChecks();
+
     /** Perform end-of-day square-off for all open positions. */
     void runEod();
 }

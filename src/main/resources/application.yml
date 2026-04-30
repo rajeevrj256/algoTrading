@@ -10,9 +10,9 @@ spring:
 
   # ── PostgreSQL Database ──────────────────────────────────────
   datasource:
-    url: jdbc:postgresql://localhost:5432/algo_trading
-    username: postgres
-    password: postgres
+    url: jdbc:postgresql://ep-twilight-haze-a1t2g6eh.ap-southeast-1.aws.neon.tech:5432/neondb?sslmode=require
+    username: neondb_owner
+    password: npg_qK4o5DepPkxY
     driver-class-name: org.postgresql.Driver
   jpa:
     hibernate:
@@ -24,6 +24,7 @@ spring:
   flyway:
     enabled: true
     locations: classpath:db/migration
+    baseline-on-migrate: true
 
   # ── Kafka ────────────────────────────────────────────────────
   kafka:
@@ -35,29 +36,70 @@ spring:
 
 # ── Application Settings ──────────────────────────────────────
 app:
-  symbols: RELIANCE,TCS,INFY,HDFCBANK,ICICIBANK,AXISBANK,WIPRO,SBIN
+  symbols: NIFTY_50,BANKNIFTY,FINNIFTY,RELIANCE,TCS,INFY,HDFCBANK,ICICIBANK,SBIN,LT,AXISBANK,ITC,BHARTIARTL,KOTAKBANK
   candle-count: 120
   scan-interval-ms: 300000        # 5 minutes
+  exit-check-interval-ms: 15000   # 15 seconds for open-position SL/target checks
   scan-initial-delay-ms: 5000     # wait 5s after startup
+  auto-shutdown:
+    enabled: true
+    cron: "0 27 15 * * MON-FRI"   # shut app down at 3:27 PM IST after EOD
+  kafka:
+    enabled: true                # set true only when a Kafka broker is available
+  datafeed:
+    provider: groww               # yahoo | groww
+
+symbol-source:
+  cache-ttl-minutes: 30
+  refresh-interval-ms: 1800000    # refresh shortlist cache every 30 min
+  refresh-initial-delay-ms: 10000
+  fallback-enabled: true          # use app.symbols when intraday_symbol table is empty
 
 # ── Data Feed ─────────────────────────────────────────────────
 datafeed:
   cache:
     ttl-seconds: 60
 
+# ── Groww Trading API ─────────────────────────────────────────
+# Used when app.datafeed.provider = groww
+# Get API key + secret from https://groww.in/user/profile/trading-apis
+# The service auto-exchanges them for a daily access token (SHA256 checksum flow).
+groww:
+  base-url: https://api.groww.in
+  api-version: "1.0"
+  min-request-gap-ms: 150         # stay below Groww's per-second burst limits
+  api-key: "eyJraWQiOiJaTUtjVXciLCJhbGciOiJFUzI1NiJ9.eyJleHAiOjI1NjU5Mjk1MzYsImlhdCI6MTc3NzUyOTUzNiwibmJmIjoxNzc3NTI5NTM2LCJzdWIiOiJ7XCJ0b2tlblJlZklkXCI6XCJhMmZlYmM4Zi03Y2QwLTQ4NWEtOTc3My1kNTA2ZWIzZDcwNTFcIixcInZlbmRvckludGVncmF0aW9uS2V5XCI6XCJlMzFmZjIzYjA4NmI0MDZjODg3NGIyZjZkODQ5NTMxM1wiLFwidXNlckFjY291bnRJZFwiOlwiZDczNWVlZGMtMGUxYS00NjNkLTk5MmQtOWQ1MWYyZDcyZTc2XCIsXCJkZXZpY2VJZFwiOlwiZjhkODViNDEtNDVjNy01MTNmLWIzNGYtOWYzZDZkNTBkNmY5XCIsXCJzZXNzaW9uSWRcIjpcIjU5ZTRkYzRlLThiOTctNDdhNy1iNjY4LTQxOGNmOGZkNDdiZlwiLFwiYWRkaXRpb25hbERhdGFcIjpcIno1NC9NZzltdjE2WXdmb0gvS0EwYk1BSFptbHJqVEtDKzNYMWRpU21uOHBSTkczdTlLa2pWZDNoWjU1ZStNZERhWXBOVi9UOUxIRmtQejFFQisybTdRPT1cIixcInJvbGVcIjpcImF1dGgtdG90cFwiLFwic291cmNlSXBBZGRyZXNzXCI6XCIxMDMuMTYzLjY1LjE3MiwxNzIuNjguNzkuMTQxLDM1LjI0MS4yMy4xMjNcIixcInR3b0ZhRXhwaXJ5VHNcIjoyNTY1OTI5NTM2NjE1LFwidmVuZG9yTmFtZVwiOlwiZ3Jvd3dBcGlcIn0iLCJpc3MiOiJhcGV4LWF1dGgtcHJvZC1hcHAifQ.lgQEn5QXvikujgvEGvD76O7mvYGYzIxo0-5lZ0sWHK8Pjsaq2WTVgjmNxFMOvdHBJpfOz4xHaCAC9Sa5-jHLwQ"
+  api-secret: "aY@UoZob#oAD#E(9Z4zKLFU(g1l%*n)o"
+  # Optional: paste a manually-generated access token to skip the exchange flow.
+  access-token: ""
+
 # ── Risk Management ───────────────────────────────────────────
 risk:
   capital: 100000               # ₹1,00,000 trading capital
-  daily-target: 1000            # Stop trading after ₹1,000 profit
-  daily-max-loss: 500           # Circuit breaker at ₹500 loss
-  max-trades-per-day: 10
-  min-confidence: 0.60
-  min-rr-ratio: 1.5
+  daily-target: 10000            # Stop trading after ₹1,000 profit
+  daily-max-loss: 4000           # Circuit breaker at ₹500 loss
+  max-trades-per-day: 150
+  min-confidence: 0.70
+  min-rr-ratio: 2.1
   risk-per-trade-pct: 0.2       # 0.2% of capital per trade
 
 # ── Paper Broker ──────────────────────────────────────────────
 broker:
   slippage-pct: 0.02            # 0.02% price slippage on fills
+
+# ── Trading Charges (India cash equity) ──────────────────────
+charges:
+  intraday: true                # true = intraday/MIS, false = delivery/CNC
+  brokerage-rate: 0.0003        # 0.03% per order
+  brokerage-cap-per-order: 20   # ₹20 max per order
+  stt-intraday-sell-rate: 0.00025
+  stt-delivery-buy-rate: 0.001
+  stt-delivery-sell-rate: 0.001
+  exchange-rate: 0.0000325
+  gst-rate: 0.18
+  sebi-rate: 0.000001
+  stamp-intraday-buy-rate: 0.00003
+  stamp-delivery-buy-rate: 0.00015
 
 # ── Database ──────────────────────────────────────────────────
 # Trade data is persisted to PostgreSQL (see spring.datasource above).
@@ -74,8 +116,8 @@ broker:
 #   4. Paste values below:
 notification:
   telegram:
-    bot-token: ""               # e.g. 123456789:ABCdef...
-    chat-id:   ""               # e.g. -1001234567890
+    bot-token: "8699809887:AAEImsrIxSLAHRkMw8WCAHYoRY6Kp4Mh5Y0"
+    chat-id: "1169619987"          # e.g. -1001234567890
 
 # ── Health Checks ─────────────────────────────────────────────
 health:

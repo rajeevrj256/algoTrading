@@ -32,6 +32,8 @@ public class PositionDTO {
     @JsonFormat(pattern = "yyyy-MM-dd'T'HH:mm:ss")
     private LocalDateTime  exitTime;
 
+    private double         grossPnl;
+    private double         charges;
     private double         pnl;
     private double         pnlPct;
     private PositionStatus status;

@@ -2,10 +2,13 @@ package com.algotrading.service.impl;
 
 import com.algotrading.dto.HealthReportDTO;
 import com.algotrading.dto.HealthReportDTO.CheckItemDTO;
+import com.algotrading.entity.HealthCheckLogEntity;
+import com.algotrading.repository.HealthCheckLogRepository;
 import com.algotrading.service.*;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
@@ -38,11 +41,11 @@ public class InternalHealthServiceImpl implements HealthService {
     private final StrategyService     strategyService;
     private final RiskService         riskService;
     private final BrokerService       brokerService;
+    private final IntradaySymbolService intradaySymbolService;
     private final SheetsService       sheetsService;
     private final NotificationService notificationService;
-
-    @Value("${app.symbols:RELIANCE,TCS,INFY,HDFCBANK,ICICIBANK,AXISBANK,WIPRO,SBIN}")
-    private String symbolsStr;
+    private final HealthCheckLogRepository healthCheckLogRepository;
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     private final AtomicInteger checkCount = new AtomicInteger(0);
     private volatile HealthReportDTO lastReport;
@@ -67,6 +70,7 @@ public class InternalHealthServiceImpl implements HealthService {
 
         items.add(checkProcess());
         items.add(checkDataFeed());
+        items.add(checkSymbolSource());
         items.add(checkStrategies());
         items.add(checkRisk());
         items.add(checkBroker());
@@ -86,9 +90,29 @@ public class InternalHealthServiceImpl implements HealthService {
                 .items(items).build();
 
         lastReport = report;
+        persistReport(report);
         printReport(report);
         log.info("[Health] #{} — {} | OK:{} WARN:{} FAIL:{}", num, overall, ok, warn, fail);
         return report;
+    }
+
+    private void persistReport(HealthReportDTO report) {
+        try {
+            String itemsJson = objectMapper.writeValueAsString(report.getItems());
+            HealthCheckLogEntity entity = HealthCheckLogEntity.builder()
+                    .checkNumber(report.getCheckNumber())
+                    .overallStatus(report.getOverallStatus())
+                    .okCount(report.getOkCount())
+                    .warnCount(report.getWarnCount())
+                    .failCount(report.getFailCount())
+                    .itemsJson(itemsJson)
+                    .build();
+            healthCheckLogRepository.save(entity);
+        } catch (JsonProcessingException e) {
+            log.warn("[Health] Failed to serialize items for persistence: {}", e.getMessage());
+        } catch (Exception e) {
+            log.warn("[Health] Failed to persist health check log: {}", e.getMessage());
+        }
     }
 
     @Override public HealthReportDTO getLastReport() { return lastReport; }
@@ -112,6 +136,20 @@ public class InternalHealthServiceImpl implements HealthService {
                     ok ? "UP" : "DOWN");
         } catch (Exception e) {
             return item("Data Feed (Yahoo Finance)", "FAIL", e.getMessage(), "ERROR");
+        }
+    }
+
+    private CheckItemDTO checkSymbolSource() {
+        try {
+            List<String> symbols = intradaySymbolService.getSymbolsForScan();
+            if (symbols.isEmpty()) {
+                return item("Intraday Symbols", "FAIL", "No eligible symbols resolved for scanning", "0 symbols");
+            }
+            return item("Intraday Symbols", "OK",
+                    "Resolved shortlist ready for scan",
+                    symbols.size() + " symbols");
+        } catch (Exception e) {
+            return item("Intraday Symbols", "FAIL", e.getMessage(), "ERROR");
         }
     }
 

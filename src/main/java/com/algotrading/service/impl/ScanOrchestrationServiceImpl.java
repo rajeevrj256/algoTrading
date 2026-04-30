@@ -2,18 +2,24 @@ package com.algotrading.service.impl;
 
 import com.algotrading.dto.*;
 import com.algotrading.enums.AlertType;
+import com.algotrading.enums.StrategyType;
 import com.algotrading.event.TradingEventPublisher;
 import com.algotrading.service.*;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.ZoneId;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 import static org.apache.logging.log4j.util.Strings.repeat;
 
@@ -39,19 +45,21 @@ import static org.apache.logging.log4j.util.Strings.repeat;
 public class ScanOrchestrationServiceImpl implements ScanOrchestrationService {
 
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
+    private static final int STRATEGY_CANDLE_INTERVAL_MIN = 5;
+    private static final long VWAP_STOP_COOLDOWN_MIN = 30;
 
     private final DataFeedService       dataFeedService;
     private final StrategyService       strategyService;
     private final RiskService           riskService;
     private final BrokerService         brokerService;
+    private final IntradaySymbolService intradaySymbolService;
     private final SheetsService         sheetsService;       // kept for printDailySummary() only
     private final TradingEventPublisher eventPublisher;
 
-    @Value("${app.symbols:RELIANCE,TCS,INFY,HDFCBANK,ICICIBANK,AXISBANK,WIPRO,SBIN}")
-    private String symbolsStr;
-
-    @Value("${app.candle-count:120}")
+    @org.springframework.beans.factory.annotation.Value("${app.candle-count:120}")
     private int candleCount;
+
+    private final Map<String, LocalDateTime> vwapStopCooldowns = new ConcurrentHashMap<>();
 
     // ── runScan ───────────────────────────────────────────────
 
@@ -67,10 +75,13 @@ public class ScanOrchestrationServiceImpl implements ScanOrchestrationService {
             return;
         }
 
-        String[] symbols = symbolsStr.split(",");
+        List<String> symbols = intradaySymbolService.getSymbolsForScan();
+        if (symbols.isEmpty()) {
+            log.warn("[Engine] Scan skipped — no eligible symbols available");
+            return;
+        }
 
-        for (String raw : symbols) {
-            String symbol = raw.trim().toUpperCase();
+        for (String symbol : symbols) {
             try {
                 processSymbol(symbol);
             } catch (Exception e) {
@@ -81,6 +92,27 @@ public class ScanOrchestrationServiceImpl implements ScanOrchestrationService {
         // Refresh open positions tab (async via Kafka)
         eventPublisher.publishOpenPositionsUpdate(brokerService.getOpenPositions());
         log.info("[Engine] ===== SCAN END =====");
+    }
+
+    @Override
+    public void runExitChecks() {
+        List<PositionDTO> openPositions = brokerService.getOpenPositions();
+        if (openPositions.isEmpty()) {
+            log.debug("[Engine] Exit check skipped — no open positions");
+            return;
+        }
+
+        Set<String> openSymbols = new LinkedHashSet<>();
+        for (PositionDTO position : openPositions) {
+            openSymbols.add(position.getSymbol());
+        }
+
+        log.debug("[Engine] Exit check start — {} open positions across {} symbols",
+                openPositions.size(), openSymbols.size());
+
+        for (String symbol : openSymbols) {
+            checkOpenPositionExits(symbol);
+        }
     }
 
     // ── runEod ────────────────────────────────────────────────
@@ -132,60 +164,84 @@ public class ScanOrchestrationServiceImpl implements ScanOrchestrationService {
     // ── Per-symbol logic ──────────────────────────────────────
 
     private void processSymbol(String symbol) {
-        // 1. Check exits for any open position on this symbol
-        Optional<Double> lastPrice = dataFeedService.getLastPrice(symbol);
-        if (lastPrice.isPresent()) {
-            List<PositionDTO> closed = brokerService.checkExits(symbol, lastPrice.get());
-            for (PositionDTO c : closed) {
-                riskService.recordTrade(c.getPnl());
-                eventPublisher.publishTradeLog(c);
-                eventPublisher.publishTradeCloseNotification(c);
-                log.info("[Engine] Exit — {} P&L=₹{} | {}", symbol,
-                        String.format("%.2f", c.getPnl()), c.getExitReason());
-            }
-        }
-
-        // 2. Skip signal scan if already in a position for this symbol
+        // 1. Check if already in a position for this symbol.
         boolean alreadyOpen = brokerService.getOpenPositions().stream()
                 .anyMatch(p -> symbol.equals(p.getSymbol()));
+
+        // 2. Check exits only for symbols that are currently open.
+        if (alreadyOpen) {
+            checkOpenPositionExits(symbol);
+        }
+
+        // 3. Skip signal scan if already in a position for this symbol
         if (alreadyOpen) {
             log.debug("[Engine] {} already has an open position — skipping signal scan", symbol);
             return;
         }
 
-        // 3. Fetch candles
-        List<CandleDTO> candles = dataFeedService.getCandles(symbol, candleCount);
-        if (candles.size() < 30) {
-            log.debug("[Engine] {} — insufficient candle data ({})", symbol, candles.size());
+        LocalDateTime cooldownUntil = activeVwapCooldown(symbol);
+        if (cooldownUntil != null) {
+            log.info("[Engine] {} skipped — VWAP_MR cooldown active until {}", symbol, cooldownUntil.toLocalTime());
             return;
         }
 
-        // 4. Run all strategies — first signal wins
-        Optional<TradeSignalDTO> signalOpt = strategyService.runStrategies(symbol, candles);
+        // 4. Fetch candles
+        List<CandleDTO> candles = dataFeedService.getCandles(symbol, candleCount);
+        List<CandleDTO> strategyCandles = completedCandlesOnly(symbol, candles);
+        if (strategyCandles.size() < 30) {
+            log.debug("[Engine] {} — insufficient completed candle data ({})", symbol, strategyCandles.size());
+            return;
+        }
+
+        // 5. Run all strategies — first signal wins
+        Optional<TradeSignalDTO> signalOpt = strategyService.runStrategies(symbol, strategyCandles);
         if (!signalOpt.isPresent()) {
             log.debug("[Engine] {} — no signal from any strategy", symbol);
             return;
         }
         TradeSignalDTO signal = signalOpt.get();
 
-        // 5. Validate signal with risk service
+        // 6. Validate signal with risk service
         RiskValidationDTO validation = riskService.validateSignal(signal);
         if (!validation.isApproved()) {
             log.info("[Engine] {} signal REJECTED — {}", symbol, validation.getReason());
             return;
         }
 
-        // 6. Execute via broker
+        // 7. Execute via broker
         PositionDTO position = brokerService.openPosition(signal);
 
-        // 7. Notify (async via Kafka)
+        // 8. Notify (async via Kafka)
         eventPublisher.publishTradeOpenNotification(position);
+        eventPublisher.publishOpenPositionsUpdate(brokerService.getOpenPositions());
 
         log.info("[Engine] ✅ OPENED {} {} x{} @ ₹{} [{}] — {}",
                 signal.getSignal(), symbol, signal.getQuantity(),
                 String.format("%.2f", position.getEntryPrice()),
                 position.getPositionId(),
                 signal.getSignalReason());
+    }
+
+    private void checkOpenPositionExits(String symbol) {
+        Optional<Double> lastPrice = dataFeedService.getLastPrice(symbol);
+        if (!lastPrice.isPresent()) {
+            return;
+        }
+
+        List<PositionDTO> closed = brokerService.checkExits(symbol, lastPrice.get());
+        for (PositionDTO c : closed) {
+            handleClosedPosition(symbol, c);
+        }
+    }
+
+    private void handleClosedPosition(String symbol, PositionDTO closedPosition) {
+        riskService.recordTrade(closedPosition.getPnl());
+        registerVwapCooldown(closedPosition);
+        eventPublisher.publishTradeLog(closedPosition);
+        eventPublisher.publishTradeCloseNotification(closedPosition);
+        eventPublisher.publishOpenPositionsUpdate(brokerService.getOpenPositions());
+        log.info("[Engine] Exit — {} P&L=₹{} | {}", symbol,
+                String.format("%.2f", closedPosition.getPnl()), closedPosition.getExitReason());
     }
 
     // ── Daily summary console print ───────────────────────────
@@ -204,5 +260,55 @@ public class ScanOrchestrationServiceImpl implements ScanOrchestrationService {
         if (sheetsService.isConnected())
             System.out.printf("  Database    : %s%n", sheetsService.getSheetUrl());
         System.out.println(sep + "\n");
+    }
+
+    private List<CandleDTO> completedCandlesOnly(String symbol, List<CandleDTO> candles) {
+        if (candles.isEmpty()) {
+            return candles;
+        }
+
+        CandleDTO last = candles.get(candles.size() - 1);
+        if (last.getTimestamp() == null) {
+            return candles;
+        }
+
+        LocalDateTime candleClosesAt = last.getTimestamp().plusMinutes(STRATEGY_CANDLE_INTERVAL_MIN);
+        if (!candleClosesAt.isAfter(LocalDateTime.now(IST))) {
+            return candles;
+        }
+
+        if (candles.size() == 1) {
+            return Collections.emptyList();
+        }
+
+        log.debug("[Engine] {} dropping in-progress candle @ {}", symbol, last.getTimestamp());
+        return new ArrayList<>(candles.subList(0, candles.size() - 1));
+    }
+
+    private void registerVwapCooldown(PositionDTO closedPosition) {
+        if (closedPosition.getStrategy() == null || closedPosition.getStrategy() != StrategyType.VWAP_MR) {
+            return;
+        }
+        String exitReason = closedPosition.getExitReason();
+        if (exitReason == null || !exitReason.startsWith("STOP LOSS")) {
+            return;
+        }
+
+        LocalDateTime cooldownUntil = LocalDateTime.now(IST).plusMinutes(VWAP_STOP_COOLDOWN_MIN);
+        vwapStopCooldowns.put(closedPosition.getSymbol(), cooldownUntil);
+        log.info("[Engine] {} cooldown armed until {} after VWAP_MR stop loss",
+                closedPosition.getSymbol(), cooldownUntil.toLocalTime());
+    }
+
+    private LocalDateTime activeVwapCooldown(String symbol) {
+        LocalDateTime cooldownUntil = vwapStopCooldowns.get(symbol);
+        if (cooldownUntil == null) {
+            return null;
+        }
+        if (!cooldownUntil.isAfter(LocalDateTime.now(IST))) {
+            vwapStopCooldowns.remove(symbol);
+            return null;
+        }
+        return cooldownUntil;
     }
 }

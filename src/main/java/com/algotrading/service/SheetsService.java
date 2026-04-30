@@ -26,6 +26,9 @@ public interface SheetsService {
     /** Append or update today's row in the "Daily Summary" tab. */
     void updateDailySummary(DailySummaryDTO summary);
 
+    /** Load the latest open-position snapshot for broker recovery after restart. */
+    List<PositionDTO> loadOpenPositions();
+
     /** Return true if the Google Sheets connection is healthy. */
     boolean isConnected();
 

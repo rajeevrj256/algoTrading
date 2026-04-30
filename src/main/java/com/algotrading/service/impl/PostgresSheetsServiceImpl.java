@@ -5,6 +5,9 @@ import com.algotrading.dto.PositionDTO;
 import com.algotrading.entity.DailySummaryEntity;
 import com.algotrading.entity.OpenPositionEntity;
 import com.algotrading.entity.TradeLogEntity;
+import com.algotrading.enums.PositionStatus;
+import com.algotrading.enums.SignalType;
+import com.algotrading.enums.StrategyType;
 import com.algotrading.repository.DailySummaryRepository;
 import com.algotrading.repository.OpenPositionRepository;
 import com.algotrading.repository.TradeLogRepository;
@@ -47,14 +50,15 @@ public class PostgresSheetsServiceImpl implements SheetsService {
             double rewardAmt = Math.abs(pos.getTarget() - pos.getEntryPrice()) * pos.getQuantity();
             double rr        = riskAmt > 0 ? r2(rewardAmt / riskAmt) : 0;
             String held      = pos.getExitTime() != null && pos.getEntryTime() != null
-                    ? Duration.between(pos.getEntryTime(), pos.getExitTime()).toString() : "N/A";
+                    ? compactDuration(Duration.between(pos.getEntryTime(), pos.getExitTime())) : "N/A";
 
             TradeLogEntity entity = TradeLogEntity.builder()
                     .tradeDate(pos.getEntryTime() != null ? pos.getEntryTime().toLocalDate() : null)
                     .tradeTime(pos.getEntryTime() != null ? pos.getEntryTime().toLocalTime() : null)
-                    .symbol(pos.getSymbol())
-                    .side(pos.getSignal().name())
-                    .strategy(pos.getStrategy() != null ? pos.getStrategy().name() : null)
+                    .positionId(limit(pos.getPositionId(), 50))
+                    .symbol(limit(pos.getSymbol(), 50))
+                    .side(limit(pos.getSignal().name(), 10))
+                    .strategy(limit(pos.getStrategy() != null ? pos.getStrategy().name() : null, 30))
                     .entryPrice(pos.getEntryPrice())
                     .exitPrice(pos.getExitPrice())
                     .stopLoss(pos.getStopLoss())
@@ -62,11 +66,12 @@ public class PostgresSheetsServiceImpl implements SheetsService {
                     .quantity(pos.getQuantity())
                     .riskAmount(r2(riskAmt))
                     .rewardAmount(r2(rewardAmt))
+                    .charges(r2(pos.getCharges()))
                     .pnl(r2(pos.getPnl()))
                     .pnlPct(r2(pos.getPnlPct()))
                     .riskReward(rr)
-                    .exitReason(pos.getExitReason())
-                    .holdDuration(held)
+                    .exitReason(limit(pos.getExitReason(), 255))
+                    .holdDuration(limit(held, 100))
                     .signalReason(pos.getSignalReason())
                     .indRsi(pos.getIndRsi())
                     .indEmaGap(pos.getIndEmaGap())
@@ -79,7 +84,9 @@ public class PostgresSheetsServiceImpl implements SheetsService {
                     .build();
 
             tradeLogRepository.save(entity);
-            log.info("[DB] Trade logged id={} | {} P&L=₹{}", entity.getId(), pos.getSymbol(), r2(pos.getPnl()));
+            log.info("[DB] Trade logged id={} | {} Gross=₹{} Charges=₹{} Net=₹{}",
+                    entity.getId(), pos.getSymbol(),
+                    r2(pos.getGrossPnl()), r2(pos.getCharges()), r2(pos.getPnl()));
         } catch (Exception e) {
             log.error("[DB] logTrade failed: {}", e.getMessage());
         }
@@ -95,6 +102,7 @@ public class PostgresSheetsServiceImpl implements SheetsService {
 
             for (PositionDTO p : openPositions) {
                 OpenPositionEntity entity = OpenPositionEntity.builder()
+                        .positionId(limit(p.getPositionId(), 50))
                         .symbol(p.getSymbol())
                         .side(p.getSignal().name())
                         .strategy(p.getStrategy() != null ? p.getStrategy().name() : null)
@@ -104,12 +112,33 @@ public class PostgresSheetsServiceImpl implements SheetsService {
                         .quantity(p.getQuantity())
                         .entryTime(p.getEntryTime())
                         .signalReason(p.getSignalReason())
+                        .indRsi(p.getIndRsi())
+                        .indEmaGap(p.getIndEmaGap())
+                        .indVwapDev(p.getIndVwapDev())
+                        .indVolRatio(p.getIndVolRatio())
+                        .indAtr(p.getIndAtr())
+                        .indExtra(p.getIndExtra())
+                        .whyFull(p.getWhyFull())
                         .build();
                 openPositionRepository.save(entity);
             }
             log.info("[DB] Open positions updated — {}", openPositions.size());
         } catch (Exception e) {
             log.error("[DB] updateOpenPositions failed: {}", e.getMessage());
+        }
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public List<PositionDTO> loadOpenPositions() {
+        try {
+            List<OpenPositionEntity> entities = openPositionRepository.findAll();
+            return entities.stream()
+                    .map(this::toPositionDto)
+                    .collect(java.util.stream.Collectors.toList());
+        } catch (Exception e) {
+            log.error("[DB] loadOpenPositions failed: {}", e.getMessage());
+            return java.util.Collections.emptyList();
         }
     }
 
@@ -162,5 +191,57 @@ public class PostgresSheetsServiceImpl implements SheetsService {
 
     private double r2(double v) {
         return Math.round(v * 100.0) / 100.0;
+    }
+
+    private String compactDuration(Duration duration) {
+        long seconds = Math.abs(duration.getSeconds());
+        long hours = seconds / 3600;
+        long minutes = (seconds % 3600) / 60;
+        long secs = seconds % 60;
+
+        if (hours > 0) return String.format("%dh %dm %ds", hours, minutes, secs);
+        if (minutes > 0) return String.format("%dm %ds", minutes, secs);
+        return String.format("%ds", secs);
+    }
+
+    private String limit(String value, int max) {
+        if (value == null || value.length() <= max) return value;
+        return value.substring(0, max);
+    }
+
+    private PositionDTO toPositionDto(OpenPositionEntity entity) {
+        PositionDTO.PositionDTOBuilder builder = PositionDTO.builder()
+                .positionId(limit(entity.getPositionId(), 50))
+                .symbol(entity.getSymbol())
+                .entryPrice(entity.getEntryPrice())
+                .stopLoss(entity.getStopLoss())
+                .target(entity.getTarget())
+                .quantity(entity.getQuantity())
+                .entryTime(entity.getEntryTime())
+                .status(PositionStatus.OPEN)
+                .signalReason(entity.getSignalReason())
+                .indRsi(entity.getIndRsi())
+                .indEmaGap(entity.getIndEmaGap())
+                .indVwapDev(entity.getIndVwapDev())
+                .indVolRatio(entity.getIndVolRatio())
+                .indAtr(entity.getIndAtr())
+                .indExtra(entity.getIndExtra())
+                .whyFull(entity.getWhyFull());
+
+        if (entity.getSide() != null) {
+            try {
+                builder.signal(SignalType.valueOf(entity.getSide()));
+            } catch (IllegalArgumentException ignored) {
+                log.warn("[DB] Skipping invalid open_position side for {}: {}", entity.getSymbol(), entity.getSide());
+            }
+        }
+        if (entity.getStrategy() != null) {
+            try {
+                builder.strategy(StrategyType.valueOf(entity.getStrategy()));
+            } catch (IllegalArgumentException ignored) {
+                log.warn("[DB] Ignoring invalid open_position strategy for {}: {}", entity.getSymbol(), entity.getStrategy());
+            }
+        }
+        return builder.build();
     }
 }

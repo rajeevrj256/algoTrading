@@ -115,9 +115,36 @@ risk:
   capital: 100000          # ₹1,00,000
   daily-target: 1000       # Stop at ₹1,000 profit
   daily-max-loss: 500      # Circuit breaker at ₹500 loss
-  max-trades-per-day: 10
+  max-trades-per-day: 100
   min-confidence: 0.60
   min-rr-ratio: 1.5
+```
+
+### Dynamic symbol source
+```yaml
+app:
+  symbols: RELIANCE,TCS,INFY
+
+symbol-source:
+  cache-ttl-minutes: 30
+  refresh-interval-ms: 1800000
+  fallback-enabled: true
+```
+
+`app.symbols` is now only a fallback list. The trading engine prefers rows from the
+`intraday_symbol` table, so another microservice can refresh the shortlist every 30 minutes.
+
+### Trading charges
+```yaml
+charges:
+  intraday: true
+  brokerage-rate: 0.0003
+  brokerage-cap-per-order: 20
+  stt-intraday-sell-rate: 0.00025
+  exchange-rate: 0.0000325
+  gst-rate: 0.18
+  sebi-rate: 0.000001
+  stamp-intraday-buy-rate: 0.00003
 ```
 
 ### Google Sheets (optional)

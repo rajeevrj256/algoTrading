@@ -3,16 +3,21 @@ package com.algotrading.service.impl;
 import com.algotrading.dto.DailySummaryDTO;
 import com.algotrading.dto.RiskValidationDTO;
 import com.algotrading.dto.TradeSignalDTO;
+import com.algotrading.entity.TradeLogEntity;
 import com.algotrading.model.DailyStats;
+import com.algotrading.repository.TradeLogRepository;
 import com.algotrading.service.RiskService;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
+import javax.annotation.PostConstruct;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.ZoneId;
+import java.util.List;
 
 /**
  * RiskServiceImpl — implements RiskService.
@@ -22,6 +27,7 @@ import java.time.ZoneId;
  */
 @Slf4j
 @Service
+@RequiredArgsConstructor
 public class RiskServiceImpl implements RiskService {
 
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
@@ -35,7 +41,7 @@ public class RiskServiceImpl implements RiskService {
     @Value("${risk.daily-max-loss:500}")
     private double dailyMaxLoss;
 
-    @Value("${risk.max-trades-per-day:10}")
+    @Value("${risk.max-trades-per-day:40}")
     private int maxTradesPerDay;
 
     @Value("${risk.min-confidence:0.60}")
@@ -44,7 +50,35 @@ public class RiskServiceImpl implements RiskService {
     @Value("${risk.min-rr-ratio:1.5}")
     private double minRrRatio;
 
+    private final TradeLogRepository tradeLogRepository;
+
     private DailyStats stats = new DailyStats(LocalDate.now(IST).toString());
+
+    @PostConstruct
+    public void restoreTodayStats() {
+        String today = LocalDate.now(IST).toString();
+        stats.reset(today);
+
+        try {
+            List<TradeLogEntity> trades = tradeLogRepository.findByTradeDate(LocalDate.now(IST));
+            for (TradeLogEntity trade : trades) {
+                stats.record(trade.getPnl());
+            }
+
+            if (stats.getTotalPnl().get() <= -dailyMaxLoss) {
+                stats.getCircuitTripped().set(true);
+            }
+
+            if (!trades.isEmpty()) {
+                log.info("[Risk] Restored {} closed trade(s) for {} | P&L=₹{} | Trades={}",
+                        trades.size(), today,
+                        String.format("%.2f", stats.getTotalPnl().get()),
+                        stats.getTrades().get());
+            }
+        } catch (Exception e) {
+            log.error("[Risk] Failed to restore daily stats: {}", e.getMessage(), e);
+        }
+    }
 
     // ── canTrade ──────────────────────────────────────────────
 
