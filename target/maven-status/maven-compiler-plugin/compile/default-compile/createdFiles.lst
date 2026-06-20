@@ -6,6 +6,7 @@ com/algotrading/entity/IntradaySymbolEntity$IntradaySymbolEntityBuilder.class
 com/algotrading/dto/HealthReportDTO.class
 com/algotrading/dto/DailySummaryDTO$DailySummaryDTOBuilder.class
 com/algotrading/service/impl/PaperBrokerServiceImpl$ExitDecision.class
+com/algotrading/service/impl/OrbRetestStrategy.class
 com/algotrading/dto/IntradaySymbolDTO.class
 com/algotrading/service/HealthService.class
 com/algotrading/service/impl/OrbStrategy.class
@@ -24,6 +25,7 @@ com/algotrading/dto/ApiResponse$ApiResponseBuilder.class
 com/algotrading/service/StrategyService.class
 com/algotrading/event/TradeReportingEvent.class
 com/algotrading/util/Indicator$SupertrendResult.class
+com/algotrading/service/impl/OrbRetestStrategy$1.class
 com/algotrading/dto/HealthReportDTO$HealthReportDTOBuilder.class
 com/algotrading/dto/RiskValidationDTO$RiskValidationDTOBuilder.class
 com/algotrading/dto/HealthReportDTO$CheckItemDTO.class
@@ -85,6 +87,7 @@ com/algotrading/dto/TradeSignalDTO$TradeSignalDTOBuilder.class
 com/algotrading/repository/DailySummaryRepository.class
 com/algotrading/service/impl/EmaCrossStrategy.class
 com/algotrading/service/ScanOrchestrationService.class
+com/algotrading/service/impl/OrbRetestStrategy$OpeningRange.class
 com/algotrading/service/impl/SupertrendStrategy.class
 com/algotrading/dto/DailySummaryDTO.class
 com/algotrading/controller/IntradaySymbolController.class

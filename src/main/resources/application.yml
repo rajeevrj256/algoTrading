@@ -10,8 +10,9 @@ spring:
 
   # ── PostgreSQL Database ──────────────────────────────────────
   datasource:
-    url:
-    username:
+    url: jdbc:postgresql://ep-twilight-haze-a1t2g6eh.ap-southeast-1.aws.neon.tech:5432/neondb?sslmode=require
+    username: ""
+    password: ""
     driver-class-name: org.postgresql.Driver
   jpa:
     hibernate:
@@ -68,7 +69,7 @@ groww:
   api-version: "1.0"
   min-request-gap-ms: 150         # stay below Groww's per-second burst limits
   api-key: ""
-  api-secret: ""
+  api-secret: "
   # Optional: paste a manually-generated access token to skip the exchange flow.
   access-token: ""
 

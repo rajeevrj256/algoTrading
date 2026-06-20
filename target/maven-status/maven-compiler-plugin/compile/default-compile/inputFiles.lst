@@ -33,6 +33,7 @@
 /Users/user/Downloads/algo-trading-monolith/src/main/java/com/algotrading/entity/IntradaySymbolEntity.java
 /Users/user/Downloads/algo-trading-monolith/src/main/java/com/algotrading/event/TradeNotificationEvent.java
 /Users/user/Downloads/algo-trading-monolith/src/main/java/com/algotrading/repository/TradeLogRepository.java
+/Users/user/Downloads/algo-trading-monolith/src/main/java/com/algotrading/service/impl/OrbRetestStrategy.java
 /Users/user/Downloads/algo-trading-monolith/src/main/java/com/algotrading/service/DataFeedService.java
 /Users/user/Downloads/algo-trading-monolith/src/main/java/com/algotrading/dto/TradeSignalDTO.java
 /Users/user/Downloads/algo-trading-monolith/src/main/java/com/algotrading/event/TradeNotificationType.java

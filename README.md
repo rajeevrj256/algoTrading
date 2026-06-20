@@ -16,7 +16,7 @@ src/main/java/com/algotrading/
 │
 ├── enums/
 │   ├── SignalType.java                  ← BUY / SELL
-│   ├── StrategyType.java                ← ORB / VWAP_MR / EMA_CROSS / SUPERTREND / GAP_GO
+│   ├── StrategyType.java                ← ORB / ORB_RETEST / VWAP_MR / EMA_CROSS / SUPERTREND / GAP_GO
 │   ├── PositionStatus.java              ← OPEN / CLOSED
 │   └── AlertType.java                  ← TRADE_OPENED / CIRCUIT_BREAKER / ...
 │
@@ -36,7 +36,7 @@ src/main/java/com/algotrading/
 │
 ├── service/                             ← INTERFACES (contracts only, no logic)
 │   ├── DataFeedService.java
-│   ├── TradingStrategy.java            ← Interface for all 5 strategies
+│   ├── TradingStrategy.java            ← Interface for all 6 strategies
 │   ├── StrategyService.java
 │   ├── RiskService.java
 │   ├── BrokerService.java
@@ -48,6 +48,7 @@ src/main/java/com/algotrading/
 ├── service/impl/                        ← IMPLEMENTATIONS (one per interface)
 │   ├── YahooFinanceDataFeedServiceImpl.java  ← DataFeedService
 │   ├── OrbStrategy.java                      ← TradingStrategy (ORB)
+│   ├── OrbRetestStrategy.java                ← TradingStrategy (ORB_RETEST)
 │   ├── VwapMeanReversionStrategy.java        ← TradingStrategy (VWAP_MR)
 │   ├── EmaCrossStrategy.java                 ← TradingStrategy (EMA_CROSS)
 │   ├── SupertrendStrategy.java               ← TradingStrategy (SUPERTREND)
