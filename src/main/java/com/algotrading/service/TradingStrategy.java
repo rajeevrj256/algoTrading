@@ -11,8 +11,8 @@ import java.util.Optional;
  * TradingStrategy — contract every strategy must fulfil.
  *
  * Implementations (all in service/impl/):
- *   OrbStrategy, VwapMeanReversionStrategy, EmaCrossStrategy,
- *   SupertrendStrategy, GapAndGoStrategy
+ *   OrbStrategy, OrbRetestStrategy, VwapMeanReversionStrategy,
+ *   EmaCrossStrategy, SupertrendStrategy, GapAndGoStrategy
  */
 public interface TradingStrategy {
 

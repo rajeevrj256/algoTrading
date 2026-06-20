@@ -155,9 +155,9 @@ public class InternalHealthServiceImpl implements HealthService {
 
     private CheckItemDTO checkStrategies() {
         List<String> loaded = strategyService.listStrategies();
-        boolean ok = loaded.size() == 5;
+        boolean ok = loaded.size() == 6;
         return item("Strategy Engine", ok ? "OK" : "WARN",
-                ok ? "All 5 strategies loaded" : "Expected 5, loaded " + loaded.size(),
+                ok ? "All 5 strategies loaded" : "Expected 6, loaded " + loaded.size(),
                 String.join(", ", loaded));
     }
 

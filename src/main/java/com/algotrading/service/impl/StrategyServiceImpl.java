@@ -15,9 +15,9 @@ import java.util.stream.Collectors;
 /**
  * StrategyServiceImpl — implements StrategyService.
  *
- * Spring auto-injects all TradingStrategy beans (ORB, VWAP_MR, EMA_CROSS,
- * SUPERTREND, GAP_GO) into the strategies list. Strategies run in the order
- * Spring resolves them; the first one that fires wins for the scan tick.
+ * Spring auto-injects all TradingStrategy beans (ORB, ORB_RETEST, VWAP_MR,
+ * EMA_CROSS, SUPERTREND, GAP_GO) into the strategies list. Strategies run in
+ * the order Spring resolves them; the first one that fires wins for the scan tick.
  */
 @Slf4j
 @Service
