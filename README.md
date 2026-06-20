@@ -1,4 +1,4 @@
-# Algo Trading Monolith
+# Real Time Algorithmic Trading Platform
 ### NSE Paper Trading System — Spring Boot + Java 8 (OOP / Interface-Impl Pattern)
 
 A clean, single-JAR monolithic Spring Boot application that implements every concern
