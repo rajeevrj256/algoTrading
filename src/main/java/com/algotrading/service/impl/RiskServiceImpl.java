@@ -2,6 +2,7 @@ package com.algotrading.service.impl;
 
 import com.algotrading.dto.DailySummaryDTO;
 import com.algotrading.dto.RiskValidationDTO;
+import com.algotrading.dto.StrategyExpectancyDTO;
 import com.algotrading.dto.TradeSignalDTO;
 import com.algotrading.entity.TradeLogEntity;
 import com.algotrading.model.DailyStats;
@@ -17,6 +18,7 @@ import javax.annotation.PostConstruct;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.ZoneId;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -172,6 +174,37 @@ public class RiskServiceImpl implements RiskService {
 
     @Override
     public boolean isCircuitTripped() { return stats.getCircuitTripped().get(); }
+
+    // ── getStrategyExpectancy ─────────────────────────────────
+
+    @Override
+    public List<StrategyExpectancyDTO> getStrategyExpectancy(int days) {
+        int window = days > 0 ? days : 7;
+        List<StrategyExpectancyDTO> result = new ArrayList<>();
+        for (Object[] row : tradeLogRepository.findStrategyExpectancy(window)) {
+            long trades = lng(row[1]);
+            long wins   = lng(row[2]);
+            double winRate = trades > 0 ? r2(100.0 * wins / trades) : 0;
+            result.add(StrategyExpectancyDTO.builder()
+                    .strategy(str(row[0]))
+                    .trades(trades)
+                    .wins(wins)
+                    .losses(lng(row[3]))
+                    .winRate(winRate)
+                    .totalPnl(r2(dbl(row[4])))
+                    .avgPnl(r2(dbl(row[5])))
+                    .totalCharges(r2(dbl(row[6])))
+                    .avgR(Math.round(dbl(row[7]) * 1000.0) / 1000.0)
+                    .bestTrade(r2(dbl(row[8])))
+                    .worstTrade(r2(dbl(row[9])))
+                    .build());
+        }
+        return result;
+    }
+
+    private static String str(Object o) { return o == null ? "UNKNOWN" : o.toString(); }
+    private static long   lng(Object o) { return o == null ? 0L : ((Number) o).longValue(); }
+    private static double dbl(Object o) { return o == null ? 0.0 : ((Number) o).doubleValue(); }
 
     private RiskValidationDTO denied(String reason) {
         log.warn("[Risk] DENIED — {}", reason);

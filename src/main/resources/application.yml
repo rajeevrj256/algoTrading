@@ -10,9 +10,7 @@ spring:
 
   # ── PostgreSQL Database ──────────────────────────────────────
   datasource:
-    url: jdbc:postgresql://ep-twilight-haze-a1t2g6eh.ap-southeast-1.aws.neon.tech:5432/neondb?sslmode=require
-    username: ""
-    password: ""
+
     driver-class-name: org.postgresql.Driver
   jpa:
     hibernate:
@@ -25,6 +23,12 @@ spring:
     enabled: true
     locations: classpath:db/migration
     baseline-on-migrate: true
+    # Flyway uses SESSION-level advisory locks, which break on Neon's PgBouncer
+    # (-pooler) endpoint. Run migrations over the DIRECT (non-pooled) endpoint —
+    # same host without "-pooler". Runtime datasource above can stay on the pooler.
+    url: "jdbc:postgresql://ep-twilight-haze-a1t2g6eh.ap-southeast-1.aws.neon.tech:5432/neondb"
+    user: "neondb_owner"
+    password: "npg_qK4o5DepPkxY"
 
   # ── Kafka ────────────────────────────────────────────────────
   kafka:
@@ -35,8 +39,10 @@ spring:
       auto-offset-reset: earliest
 
 # ── Application Settings ──────────────────────────────────────
+# Indices (NIFTY_50/BANKNIFTY/FINNIFTY) removed — not cash-equity tradeable; the
+# charges model is intraday equity. Add them back only via an F&O code path.
 app:
-  symbols: NIFTY_50,BANKNIFTY,FINNIFTY,RELIANCE,TCS,INFY,HDFCBANK,ICICIBANK,SBIN,LT,AXISBANK,ITC,BHARTIARTL,KOTAKBANK
+  symbols: RELIANCE,TCS,INFY,HDFCBANK,ICICIBANK,SBIN,LT,AXISBANK,ITC,BHARTIARTL,KOTAKBANK
   candle-count: 120
   scan-interval-ms: 300000        # 5 minutes
   exit-check-interval-ms: 15000   # 15 seconds for open-position SL/target checks
@@ -76,16 +82,26 @@ groww:
 # ── Risk Management ───────────────────────────────────────────
 risk:
   capital: 100000               # ₹1,00,000 trading capital
-  daily-target: 10000            # Stop trading after ₹1,000 profit
-  daily-max-loss: 4000           # Circuit breaker at ₹500 loss
+  daily-target: 2000             # Stop trading after ₹2,000 profit (~2% of capital)
+  daily-max-loss: 1500           # Circuit breaker at ₹1,500 loss (~7 full-stop losses)
   max-trades-per-day: 150
-  min-confidence: 0.70
-  min-rr-ratio: 2.1
+  # NOTE: min-rr-ratio MUST match what the strategies actually emit.
+  # Strategies design RR ~1.5-1.8 (EMA 1.67, VWAP ≤1.8, ORB ≤1.5). The old 2.1
+  # silently rejected EMA/VWAP/ORB/GAP_GO and only let SUPERTREND whipsaws through.
+  min-confidence: 0.65
+  min-rr-ratio: 1.5
   risk-per-trade-pct: 0.2       # 0.2% of capital per trade
 
 # ── Paper Broker ──────────────────────────────────────────────
 broker:
   slippage-pct: 0.02            # 0.02% price slippage on fills
+  # Trailing/breakeven stop — stops winners turning into losers and locks profit
+  # when a winner reverses before the (far) target. Attacks realized-RR < designed-RR.
+  trailing:
+    enabled: true
+    breakeven-trigger-r: 1.0    # at +1R favorable, move stop to entry (breakeven)
+    trail-start-r: 1.5          # beyond +1.5R, start trailing
+    trail-giveback-r: 1.0       # trail locks (peakR − 1.0)R of profit
 
 # ── Trading Charges (India cash equity) ──────────────────────
 charges:

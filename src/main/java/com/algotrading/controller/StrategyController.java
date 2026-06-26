@@ -11,6 +11,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -19,6 +20,10 @@ import java.util.Optional;
  * POST /api/strategy/scan/{symbol}                — run all strategies
  * POST /api/strategy/scan/{symbol}/{strategyType} — run one strategy
  * GET  /api/strategy/list                         — list loaded strategies
+ * GET  /api/strategy/config                       — enabled/disabled state of each
+ * POST /api/strategy/config/{type}/enable         — enable at runtime (persists)
+ * POST /api/strategy/config/{type}/disable        — disable at runtime (persists)
+ * POST /api/strategy/config/refresh               — reload enabled set from DB
  */
 @Slf4j
 @RestController
@@ -55,5 +60,30 @@ public class StrategyController {
     @GetMapping("/list")
     public ResponseEntity<ApiResponse<List<String>>> listStrategies() {
         return ResponseEntity.ok(ApiResponse.ok(strategyService.listStrategies()));
+    }
+
+    // ── Runtime enable/disable (persisted to strategy_config) ──
+
+    @GetMapping("/config")
+    public ResponseEntity<ApiResponse<Map<String, Boolean>>> config() {
+        return ResponseEntity.ok(ApiResponse.ok(strategyService.getStrategyStatus()));
+    }
+
+    @PostMapping("/config/{type}/enable")
+    public ResponseEntity<ApiResponse<Map<String, Boolean>>> enable(@PathVariable StrategyType type) {
+        strategyService.setStrategyEnabled(type, true);
+        return ResponseEntity.ok(ApiResponse.ok(type + " enabled", strategyService.getStrategyStatus()));
+    }
+
+    @PostMapping("/config/{type}/disable")
+    public ResponseEntity<ApiResponse<Map<String, Boolean>>> disable(@PathVariable StrategyType type) {
+        strategyService.setStrategyEnabled(type, false);
+        return ResponseEntity.ok(ApiResponse.ok(type + " disabled", strategyService.getStrategyStatus()));
+    }
+
+    @PostMapping("/config/refresh")
+    public ResponseEntity<ApiResponse<Map<String, Boolean>>> refresh() {
+        strategyService.refreshEnabledStrategies();
+        return ResponseEntity.ok(ApiResponse.ok("Reloaded from strategy_config", strategyService.getStrategyStatus()));
     }
 }

@@ -2,7 +2,10 @@ package com.algotrading.service;
 
 import com.algotrading.dto.DailySummaryDTO;
 import com.algotrading.dto.RiskValidationDTO;
+import com.algotrading.dto.StrategyExpectancyDTO;
 import com.algotrading.dto.TradeSignalDTO;
+
+import java.util.List;
 
 /**
  * RiskService — validates signals and manages daily risk state.
@@ -37,4 +40,10 @@ public interface RiskService {
 
     /** Return whether the circuit breaker is currently tripped. */
     boolean isCircuitTripped();
+
+    /**
+     * Per-strategy realized expectancy over the last {@code days} days.
+     * Use it to find and disable negative-expectancy strategies.
+     */
+    List<StrategyExpectancyDTO> getStrategyExpectancy(int days);
 }

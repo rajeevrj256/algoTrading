@@ -3,12 +3,15 @@ package com.algotrading.controller;
 import com.algotrading.dto.ApiResponse;
 import com.algotrading.dto.DailySummaryDTO;
 import com.algotrading.dto.RiskValidationDTO;
+import com.algotrading.dto.StrategyExpectancyDTO;
 import com.algotrading.dto.TradeSignalDTO;
 import com.algotrading.service.RiskService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
 
 /**
  * RiskController — REST API for risk management.
@@ -17,6 +20,7 @@ import org.springframework.web.bind.annotation.*;
  * POST /api/risk/validate
  * POST /api/risk/record?pnl=
  * GET  /api/risk/summary
+ * GET  /api/risk/expectancy?days=7
  * POST /api/risk/reset
  * GET  /api/risk/circuit-breaker
  */
@@ -50,6 +54,16 @@ public class RiskController {
     @GetMapping("/summary")
     public ResponseEntity<ApiResponse<DailySummaryDTO>> summary() {
         return ResponseEntity.ok(ApiResponse.ok(riskService.getDailySummary()));
+    }
+
+    /**
+     * Per-strategy realized expectancy over the last N days (default 7).
+     * Sorted best avg-P&L first. Disable any strategy with negative avgPnl/avgR.
+     */
+    @GetMapping("/expectancy")
+    public ResponseEntity<ApiResponse<List<StrategyExpectancyDTO>>> expectancy(
+            @RequestParam(defaultValue = "7") int days) {
+        return ResponseEntity.ok(ApiResponse.ok(riskService.getStrategyExpectancy(days)));
     }
 
     @PostMapping("/reset")

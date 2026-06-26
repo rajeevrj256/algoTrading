@@ -20,7 +20,9 @@ public class PositionDTO {
     private String         symbol;
     private double         entryPrice;
     private double         exitPrice;
-    private double         stopLoss;
+    private double         stopLoss;       // live stop — trailing logic moves this
+    private double         initialStop;    // original stop at entry; defines 1R risk (immutable)
+    private double         peakPrice;      // best favorable price seen; drives the trail
     private double         target;
     private int            quantity;
     private SignalType     signal;
