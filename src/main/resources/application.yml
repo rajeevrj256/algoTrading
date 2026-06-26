@@ -10,9 +10,7 @@ spring:
 
   # ── PostgreSQL Database ──────────────────────────────────────
   datasource:
-    url: "jdbc:postgresql://ep-twilight-haze-a1t2g6eh-pooler.ap-southeast-1.aws.neon.tech:5432/neondb"
-    username: "neondb_owner"
-    "password": "npg_qK4o5DepPkxY"
+
     driver-class-name: org.postgresql.Driver
   jpa:
     hibernate:
