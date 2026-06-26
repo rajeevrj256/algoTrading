@@ -1,8 +1,10 @@
 package com.algotrading.event;
 
 import com.algotrading.dto.AlertDTO;
+import com.algotrading.dto.CandleDTO;
 import com.algotrading.dto.DailySummaryDTO;
 import com.algotrading.dto.PositionDTO;
+import com.algotrading.service.CandleHistoryService;
 import com.algotrading.service.NotificationService;
 import com.algotrading.service.SheetsService;
 import lombok.RequiredArgsConstructor;
@@ -29,6 +31,7 @@ public class TradingEventPublisher {
 
     private static final String TOPIC_REPORTING     = "algotrading.trade-reporting";
     private static final String TOPIC_NOTIFICATIONS = "algotrading.trade-notifications";
+    private static final String TOPIC_CANDLES       = "algotrading.candle-ingest";
 
     @Value("${app.kafka.enabled:false}")
     private boolean kafkaEnabled;
@@ -36,6 +39,24 @@ public class TradingEventPublisher {
     private final ObjectProvider<KafkaTemplate<String, Object>> kafkaTemplateProvider;
     private final SheetsService sheetsService;
     private final NotificationService notificationService;
+    private final CandleHistoryService candleHistoryService;
+
+    // ── Candle ingest (→ CandleHistoryService / candle_history) ─
+
+    /** Persist freshly-fetched candles. Fire-and-forget; falls back to direct save. */
+    public void publishCandles(String symbol, List<CandleDTO> candles) {
+        if (symbol == null || candles == null || candles.isEmpty()) return;
+        if (!shouldUseKafka()) {
+            candleHistoryService.saveAll(symbol, candles);
+            return;
+        }
+        CandleIngestEvent event = CandleIngestEvent.builder()
+                .symbol(symbol)
+                .candles(candles)
+                .timestamp(LocalDateTime.now())
+                .build();
+        send(TOPIC_CANDLES, symbol, event);
+    }
 
     // ── Reporting events (→ SheetsService / PostgreSQL) ──────
 

@@ -84,6 +84,7 @@ public class GrowFinanceDataFeedServiceImpl implements DataFeedService {
 
     private final RestTemplate restTemplate;
     private final ObjectMapper objectMapper;
+    private final com.algotrading.event.TradingEventPublisher eventPublisher;
 
     private final Map<String, List<CandleDTO>> cache = new ConcurrentHashMap<>();
     private final Map<String, LocalDateTime> cacheTime = new ConcurrentHashMap<>();
@@ -100,6 +101,13 @@ public class GrowFinanceDataFeedServiceImpl implements DataFeedService {
         if (!fetched.isEmpty()) {
             cache.put(symbol, fetched);
             cacheTime.put(symbol, LocalDateTime.now(IST));
+            // Persist this fresh pull to candle_history (via Kafka, fire-and-forget)
+            // so backtests accumulate real depth beyond the feed's 5-day window.
+            try {
+                eventPublisher.publishCandles(symbol, fetched);
+            } catch (Exception e) {
+                log.debug("[Groww] candle persist skipped for {}: {}", symbol, e.getMessage());
+            }
             return tail(fetched, count);
         }
         List<CandleDTO> stale = cache.get(symbol);

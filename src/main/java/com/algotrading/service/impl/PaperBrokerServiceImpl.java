@@ -42,6 +42,18 @@ public class PaperBrokerServiceImpl implements BrokerService {
     @Value("${broker.slippage-pct:0.02}")
     private double slippagePct;
 
+    @Value("${broker.trailing.enabled:true}")
+    private boolean trailingEnabled;
+
+    @Value("${broker.trailing.breakeven-trigger-r:1.0}")
+    private double breakevenTriggerR;
+
+    @Value("${broker.trailing.trail-start-r:1.5}")
+    private double trailStartR;
+
+    @Value("${broker.trailing.trail-giveback-r:1.0}")
+    private double trailGivebackR;
+
     private final ChargesService chargesService;
     private final SheetsService sheetsService;
     private final TradeLogRepository tradeLogRepository;
@@ -117,7 +129,9 @@ public class PaperBrokerServiceImpl implements BrokerService {
 
         PositionDTO pos = PositionDTO.builder()
                 .positionId(posId).symbol(signal.getSymbol())
-                .entryPrice(filled).stopLoss(signal.getStopLoss()).target(signal.getTarget())
+                .entryPrice(filled).stopLoss(signal.getStopLoss())
+                .initialStop(signal.getStopLoss()).peakPrice(filled)
+                .target(signal.getTarget())
                 .quantity(signal.getQuantity()).signal(signal.getSignal()).strategy(signal.getStrategy())
                 .entryTime(now).status(PositionStatus.OPEN)
                 .signalReason(signal.getSignalReason()).whyFull(signal.getWhyFull())
@@ -168,22 +182,56 @@ public class PaperBrokerServiceImpl implements BrokerService {
 
     @Override
     public List<PositionDTO> checkExits(String symbol, double currentPrice) {
-        List<String> toClose = openPositions.values().stream()
+        List<PositionDTO> forSymbol = openPositions.values().stream()
                 .filter(p -> p.getSymbol().equals(symbol))
-                .filter(p -> resolveExit(p, currentPrice) != null)
-                .map(PositionDTO::getPositionId)
                 .collect(Collectors.toList());
 
         List<PositionDTO> closed = new ArrayList<>();
-        for (String id : toClose) {
-            PositionDTO p = openPositions.get(id);
-            if (p == null) continue;
+        for (PositionDTO p : forSymbol) {
+            applyTrailingStop(p, currentPrice);     // tighten stop BEFORE checking exit
             ExitDecision exit = resolveExit(p, currentPrice);
             if (exit == null) continue;
-            PositionDTO c = closePosition(id, exit.price, exit.reason);
+            PositionDTO c = closePosition(p.getPositionId(), exit.price, exit.reason);
             if (c != null) closed.add(c);
         }
         return closed;
+    }
+
+    /**
+     * Trailing / breakeven stop. Ratchets the live stop in the favorable direction
+     * only — never loosens. Defines 1R from the immutable initialStop:
+     *   - peak ≥ breakeven-trigger-R  → stop to entry (winner can't become a loser)
+     *   - peak ≥ trail-start-R        → stop locks (peakR − giveback)R of profit
+     * Target is left untouched, so winners still run to the full target if they reach it.
+     */
+    private void applyTrailingStop(PositionDTO p, double price) {
+        if (!trailingEnabled) return;
+
+        double entry = p.getEntryPrice();
+        double initStop = p.getInitialStop() != 0 ? p.getInitialStop() : p.getStopLoss();
+        double r = Math.abs(entry - initStop);
+        if (r <= 0) return;
+
+        boolean isLong = p.getSignal() == SignalType.BUY;
+
+        // Track best favorable excursion.
+        double peak = p.getPeakPrice() != 0 ? p.getPeakPrice() : entry;
+        peak = isLong ? Math.max(peak, price) : Math.min(peak, price);
+        p.setPeakPrice(peak);
+
+        double peakR = isLong ? (peak - entry) / r : (entry - peak) / r;
+        if (peakR < breakevenTriggerR) return;   // not yet far enough in profit
+
+        double lockedR = peakR >= trailStartR ? Math.max(0.0, peakR - trailGivebackR) : 0.0;
+        double newStop = isLong ? entry + lockedR * r : entry - lockedR * r;
+        newStop = r2(newStop);
+
+        // Only ever tighten.
+        if (isLong) {
+            if (newStop > p.getStopLoss()) p.setStopLoss(newStop);
+        } else {
+            if (newStop < p.getStopLoss()) p.setStopLoss(newStop);
+        }
     }
 
     // ── squareOffAll ──────────────────────────────────────────
@@ -222,17 +270,30 @@ public class PaperBrokerServiceImpl implements BrokerService {
                 return new ExitDecision(p.getTarget(), String.format("TARGET HIT @ ₹%.2f", p.getTarget()));
             }
             if (price <= p.getStopLoss()) {
-                return new ExitDecision(p.getStopLoss(), String.format("STOP LOSS @ ₹%.2f", p.getStopLoss()));
+                return new ExitDecision(p.getStopLoss(), stopLabel(p, true));
             }
         } else {
             if (price <= p.getTarget()) {
                 return new ExitDecision(p.getTarget(), String.format("TARGET HIT @ ₹%.2f", p.getTarget()));
             }
             if (price >= p.getStopLoss()) {
-                return new ExitDecision(p.getStopLoss(), String.format("STOP LOSS @ ₹%.2f", p.getStopLoss()));
+                return new ExitDecision(p.getStopLoss(), stopLabel(p, false));
             }
         }
         return null;
+    }
+
+    /**
+     * Distinguish an original stop-loss from a trailed/breakeven stop so the
+     * expectancy report and logs show what actually happened.
+     */
+    private String stopLabel(PositionDTO p, boolean isLong) {
+        double stop = p.getStopLoss();
+        double entry = p.getEntryPrice();
+        boolean movedToProfit = isLong ? stop > entry : stop < entry;
+        boolean atBreakeven   = Math.abs(stop - entry) < 1e-9;
+        String kind = movedToProfit ? "TRAIL STOP" : atBreakeven ? "BREAKEVEN STOP" : "STOP LOSS";
+        return String.format("%s @ ₹%.2f", kind, stop);
     }
 
     private String nextRestoredPositionId() {
