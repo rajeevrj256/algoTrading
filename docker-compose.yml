@@ -3,25 +3,33 @@
 # Stop:               docker compose down        (add -v to also wipe the DB volume)
 # Logs:               docker compose logs -f
 #
-# Gives the host app:  PostgreSQL @ localhost:5432 (db algo_trading, algo/algo)
-#                      Kafka      @ localhost:9092
-# Point the app at them via .env:  DB_USERNAME=algo  DB_PASSWORD=algo
-#                                  app.kafka.enabled=true (application.yml)
+# AUTO-READS the .env in this folder (the SAME file the app loads) for the ${...}
+# values below. Blank/unset → the :- default. So set once in .env and both the
+# container and the host app use the same DB creds:
+#   DB_USERNAME=algo         # Postgres user  (default: algo)
+#   DB_PASSWORD=algo         # Postgres pass  (default: algo)
+#   POSTGRES_DB=algo_trading # DB name        (default: algo_trading)
+# To make the host app use THIS Postgres (not Neon), also point it here in .env:
+#   DB_URL=jdbc:postgresql://localhost:5432/algo_trading
+#   DB_DIRECT_URL=jdbc:postgresql://localhost:5432/algo_trading
+# Kafka has no secrets. Enable it in application.yml: app.kafka.enabled=true
+#
+# Gives the host app:  PostgreSQL @ localhost:5432   Kafka @ localhost:9092
 
 services:
   postgres:
     image: postgres:16-alpine
     container_name: algo-postgres
     environment:
-      POSTGRES_DB: algo_trading
-      POSTGRES_USER: algo
-      POSTGRES_PASSWORD: algo
+      POSTGRES_DB: ${POSTGRES_DB:-algo_trading}
+      POSTGRES_USER: ${DB_USERNAME:-algo}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-algo}
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U algo -d algo_trading"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 3s
       retries: 10
