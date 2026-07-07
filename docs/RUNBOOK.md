@@ -287,7 +287,21 @@ falls back to a direct DB save. Turn it on only when a broker is actually runnin
 `spring.kafka.bootstrap-servers` (default `localhost:9092`), otherwise every publish stalls
 ~60s then fails. With Docker Desktop running, use either option below.
 
-### Option A — one-liner (KRaft, no ZooKeeper)
+### Recommended — the repo `docker-compose.yml` (one command)
+
+The repo root ships a `docker-compose.yml` that starts **both** dependencies the project
+needs — PostgreSQL (`localhost:5432`, db `algo_trading`, `algo`/`algo`) and Kafka
+(`localhost:9092`, single-node KRaft):
+
+```bash
+docker compose up -d          # start Postgres + Kafka
+docker compose logs -f        # watch
+docker compose down           # stop  (add -v to also wipe the DB volume)
+```
+
+If you use Neon (or another DB) and only need the broker: `docker compose up -d kafka`.
+
+### Or just Kafka, no file (one-liner)
 
 ```bash
 docker run -d --name kafka -p 9092:9092 apache/kafka:3.7.0
@@ -295,32 +309,6 @@ docker run -d --name kafka -p 9092:9092 apache/kafka:3.7.0
 
 The official `apache/kafka` image runs single-node KRaft mode and advertises
 `localhost:9092` out of the box — ready for a host client.
-
-### Option B — docker-compose (recommended; explicit listener)
-
-`docker-compose.yml`:
-```yaml
-services:
-  kafka:
-    image: apache/kafka:3.7.0
-    container_name: kafka
-    ports:
-      - "9092:9092"
-    environment:
-      KAFKA_NODE_ID: 1
-      KAFKA_PROCESS_ROLES: broker,controller
-      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
-      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
-```
-```bash
-docker compose up -d
-```
 
 ### Turn it on in the app
 
