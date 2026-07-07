@@ -29,6 +29,11 @@ public interface DataFeedService {
     boolean isAvailable();
 
     /**
+     * Human-readable name of the active provider (e.g. "Groww", "Yahoo Finance").
+     */
+    String getProviderName();
+
+    /**
      * Evict the local TTL cache for a symbol, forcing a fresh fetch.
      */
     void evictCache(String symbol);

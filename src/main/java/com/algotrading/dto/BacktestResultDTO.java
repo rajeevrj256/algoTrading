@@ -13,6 +13,8 @@ import lombok.NoArgsConstructor;
 @Data @Builder @NoArgsConstructor @AllArgsConstructor
 public class BacktestResultDTO {
     private String  strategy;
+    private String  mode;           // EQUITY (cash) or FNO (index options)
+    private int     skipped;        // FNO: signals dropped — no Groww option data / no contract
     private int     symbols;        // how many symbols contributed trades
     private int     trades;
     private int     wins;

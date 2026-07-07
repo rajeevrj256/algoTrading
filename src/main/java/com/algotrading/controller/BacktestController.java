@@ -48,4 +48,51 @@ public class BacktestController {
                         symbolList.size(), results.size()),
                 results));
     }
+
+    /**
+     * Intraday EQUITY backtest over Groww CASH history.
+     * POST /api/backtest/equity?symbols=RELIANCE,TCS&strategy=VWAP_TREND&days=30
+     */
+    @PostMapping("/equity")
+    public ResponseEntity<ApiResponse<List<BacktestResultDTO>>> equity(
+            @RequestParam String symbols,
+            @RequestParam(required = false) StrategyType strategy,
+            @RequestParam(defaultValue = "30") int days) {
+
+        List<String> symbolList = parseSymbols(symbols);
+        if (symbolList.isEmpty()) {
+            return ResponseEntity.ok(ApiResponse.error("No symbols provided"));
+        }
+        List<BacktestResultDTO> results = backtestService.runEquity(symbolList, strategy, days);
+        return ResponseEntity.ok(ApiResponse.ok(
+                String.format("Equity backtest complete — %d symbol(s), %dd, %d strategy result(s)",
+                        symbolList.size(), days, results.size()),
+                results));
+    }
+
+    /**
+     * F&O (index options) backtest on REAL Groww FNO premium candles.
+     * POST /api/backtest/fno?symbols=NIFTY,BANKNIFTY&strategy=INDEX_TREND&days=30
+     */
+    @PostMapping("/fno")
+    public ResponseEntity<ApiResponse<List<BacktestResultDTO>>> fno(
+            @RequestParam String symbols,
+            @RequestParam(required = false) StrategyType strategy,
+            @RequestParam(defaultValue = "30") int days) {
+
+        List<String> symbolList = parseSymbols(symbols);
+        if (symbolList.isEmpty()) {
+            return ResponseEntity.ok(ApiResponse.error("No symbols provided"));
+        }
+        List<BacktestResultDTO> results = backtestService.runFno(symbolList, strategy, days);
+        return ResponseEntity.ok(ApiResponse.ok(
+                String.format("F&O backtest complete — %d index(es), %dd, %d strategy result(s)",
+                        symbolList.size(), days, results.size()),
+                results));
+    }
+
+    private List<String> parseSymbols(String symbols) {
+        return Arrays.stream(symbols.split(","))
+                .map(String::trim).filter(s -> !s.isEmpty()).collect(Collectors.toList());
+    }
 }

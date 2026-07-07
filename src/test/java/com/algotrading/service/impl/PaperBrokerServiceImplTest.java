@@ -3,6 +3,7 @@ package com.algotrading.service.impl;
 import com.algotrading.dto.PositionDTO;
 import com.algotrading.dto.TradeSignalDTO;
 import com.algotrading.enums.SignalType;
+import com.algotrading.repository.FnoTradeLogRepository;
 import com.algotrading.repository.TradeLogRepository;
 import com.algotrading.service.SheetsService;
 import org.junit.jupiter.api.Test;
@@ -22,13 +23,15 @@ class PaperBrokerServiceImplTest {
     void restoreOpenPositionsSeedsNextPositionIdFromHistoricalTrades() {
         SheetsService sheetsService = mock(SheetsService.class);
         TradeLogRepository tradeLogRepository = mock(TradeLogRepository.class);
+        FnoTradeLogRepository fnoTradeLogRepository = mock(FnoTradeLogRepository.class);
         ChargesServiceImpl chargesService = new ChargesServiceImpl();
 
         when(sheetsService.loadOpenPositions()).thenReturn(Collections.emptyList());
         when(tradeLogRepository.findMaxPositionSequence()).thenReturn(27);
         when(tradeLogRepository.findByTradeDate(any(LocalDate.class))).thenReturn(Collections.emptyList());
+        when(fnoTradeLogRepository.findByTradeDate(any(LocalDate.class))).thenReturn(Collections.emptyList());
 
-        PaperBrokerServiceImpl brokerService = new PaperBrokerServiceImpl(chargesService, sheetsService, tradeLogRepository);
+        PaperBrokerServiceImpl brokerService = new PaperBrokerServiceImpl(chargesService, sheetsService, tradeLogRepository, fnoTradeLogRepository);
         brokerService.restoreOpenPositions();
 
         PositionDTO openedPosition = brokerService.openPosition(TradeSignalDTO.builder()
@@ -47,12 +50,14 @@ class PaperBrokerServiceImplTest {
     void checkExitsClosesAtConfiguredStopLossInsteadOfLaterPolledPrice() {
         SheetsService sheetsService = mock(SheetsService.class);
         TradeLogRepository tradeLogRepository = mock(TradeLogRepository.class);
+        FnoTradeLogRepository fnoTradeLogRepository = mock(FnoTradeLogRepository.class);
         ChargesServiceImpl chargesService = new ChargesServiceImpl();
 
         when(sheetsService.loadOpenPositions()).thenReturn(Collections.emptyList());
         when(tradeLogRepository.findByTradeDate(any(LocalDate.class))).thenReturn(Collections.emptyList());
+        when(fnoTradeLogRepository.findByTradeDate(any(LocalDate.class))).thenReturn(Collections.emptyList());
 
-        PaperBrokerServiceImpl brokerService = new PaperBrokerServiceImpl(chargesService, sheetsService, tradeLogRepository);
+        PaperBrokerServiceImpl brokerService = new PaperBrokerServiceImpl(chargesService, sheetsService, tradeLogRepository, fnoTradeLogRepository);
 
         PositionDTO openedPosition = brokerService.openPosition(TradeSignalDTO.builder()
                 .symbol("INFY")

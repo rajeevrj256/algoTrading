@@ -4,15 +4,19 @@ server:
 spring:
   application:
     name: algo-trading-monolith
+  # Secrets come from environment variables (or a local .env file — gitignored).
+  # Copy .env.example → .env and fill in values. NEVER commit real credentials.
+  config:
+    import: "optional:file:.env[.properties]"
   jackson:
     serialization:
       write-dates-as-timestamps: false
 
   # ── PostgreSQL Database ──────────────────────────────────────
   datasource:
-    url: "jdbc:postgresql://ep-twilight-haze-a1t2g6eh-pooler.ap-southeast-1.aws.neon.tech:5432/neondb"
-    username: "neondb_owner"
-    "password": "npg_qK4o5DepPkxY"
+    url: "${DB_URL:jdbc:postgresql://localhost:5432/algo_trading}"
+    username: "${DB_USERNAME:}"
+    password: "${DB_PASSWORD:}"
     driver-class-name: org.postgresql.Driver
   jpa:
     hibernate:
@@ -25,12 +29,13 @@ spring:
     enabled: true
     locations: classpath:db/migration
     baseline-on-migrate: true
-    # Flyway uses SESSION-level advisory locks, which break on Neon's PgBouncer
-    # (-pooler) endpoint. Run migrations over the DIRECT (non-pooled) endpoint —
-    # same host without "-pooler". Runtime datasource above can stay on the pooler.
-    url: "jdbc:postgresql://ep-twilight-haze-a1t2g6eh.ap-southeast-1.aws.neon.tech:5432/neondb"
-    user: "neondb_owner"
-    password: "npg_qK4o5DepPkxY"
+    # Flyway needs session advisory locks, which BREAK through PgBouncer
+    # (Neon's -pooler endpoint) → "Unable to release PostgreSQL advisory lock".
+    # Always run Flyway over the DIRECT endpoint (host WITHOUT "-pooler").
+    # The app's runtime pool (spring.datasource) can keep using the pooler.
+    url: "${DB_DIRECT_URL:${DB_URL:jdbc:postgresql://localhost:5432/algo_trading}}"
+    user: "${DB_USERNAME:}"
+    password: "${DB_PASSWORD:}"
 
   # ── Kafka ────────────────────────────────────────────────────
   kafka:
@@ -41,13 +46,11 @@ spring:
       auto-offset-reset: earliest
 
 # ── Application Settings ──────────────────────────────────────
-# Indices (NIFTY_50/BANKNIFTY/FINNIFTY) removed — not cash-equity tradeable; the
-# charges model is intraday equity. Add them back only via an F&O code path.
 app:
-  symbols: RELIANCE,TCS,INFY,HDFCBANK,ICICIBANK,SBIN,LT,AXISBANK,ITC,BHARTIARTL,KOTAKBANK
+  symbols: NIFTY_50,BANKNIFTY,FINNIFTY,RELIANCE,TCS,INFY,HDFCBANK,ICICIBANK,SBIN,LT,AXISBANK,ITC,BHARTIARTL,KOTAKBANK
   candle-count: 120
   scan-interval-ms: 300000        # 5 minutes
-  exit-check-interval-ms: 15000   # 15 seconds for open-position SL/target checks
+  exit-check-interval-ms: 5000    # 5 seconds for open-position SL/target checks (faster exits)
   scan-initial-delay-ms: 5000     # wait 5s after startup
   auto-shutdown:
     enabled: true
@@ -55,7 +58,10 @@ app:
   kafka:
     enabled: true                # set true only when a Kafka broker is available
   datafeed:
-    provider: groww               # yahoo | groww
+    # yahoo | groww — Groww LTP/candles need their PAID data plan (free-plan keys
+    # get 403 on all market-data endpoints even though token exchange succeeds).
+    # Yahoo is free and handles indices (^NSEI etc.) + equities (.NS).
+    provider: groww
 
 symbol-source:
   cache-ttl-minutes: 30
@@ -63,10 +69,25 @@ symbol-source:
   refresh-initial-delay-ms: 10000
   fallback-enabled: true          # use app.symbols when intraday_symbol table is empty
 
+# ── Backtesting (after-hours) ─────────────────────────────────
+# Groww PAID historical-data API feeds both engines. Split endpoints:
+#   POST /api/backtest/equity?symbols=RELIANCE,TCS&strategy=&days=30   (cash, cash charges)
+#   POST /api/backtest/fno?symbols=NIFTY,BANKNIFTY&strategy=&days=30    (real FNO premiums)
+# F&O uses REAL Groww FNO option candles; signals with no option data are counted
+# as "skipped" in the result (no synthetic pricing).
+backtest:
+  lookback-days: 30               # default window when the endpoint omits ?days=
+  groww:
+    interval-minutes: 5           # candle granularity (match the live 5-min feed)
+    max-days-per-request: 25      # chunk size — stay under Groww's per-request range cap
+
 # ── Data Feed ─────────────────────────────────────────────────
 datafeed:
   cache:
-    ttl-seconds: 60
+    ttl-seconds: 90
+  yahoo:
+    min-request-gap-ms: 1200            # Yahoo 429s bursts — space requests out
+    rate-limit-cooldown-seconds: 180    # after a 429: back off (doubles per repeat, max 30 min), serve stale cache
 
 # ── Groww Trading API ─────────────────────────────────────────
 # Used when app.datafeed.provider = groww
@@ -76,34 +97,62 @@ groww:
   base-url: https://api.groww.in
   api-version: "1.0"
   min-request-gap-ms: 150         # stay below Groww's per-second burst limits
-  api-key: ""
-  api-secret: ""
+  api-key: "${GROWW_API_KEY:}"
+  api-secret: "${GROWW_API_SECRET:}"
   # Optional: paste a manually-generated access token to skip the exchange flow.
-  access-token: ""
+  access-token: "${GROWW_ACCESS_TOKEN:}"
 
 # ── Risk Management ───────────────────────────────────────────
 risk:
   capital: 100000               # ₹1,00,000 trading capital
-  daily-target: 2000             # Stop trading after ₹2,000 profit (~2% of capital)
-  daily-max-loss: 1500           # Circuit breaker at ₹1,500 loss (~7 full-stop losses)
+  daily-target: 10000            # Stop trading (protect gains) once today's net profit hits ₹10,000
+  daily-max-loss: 40000          # Circuit breaker: halt trading once today's net loss hits ₹40,000
   max-trades-per-day: 150
-  # NOTE: min-rr-ratio MUST match what the strategies actually emit.
-  # Strategies design RR ~1.5-1.8 (EMA 1.67, VWAP ≤1.8, ORB ≤1.5). The old 2.1
-  # silently rejected EMA/VWAP/ORB/GAP_GO and only let SUPERTREND whipsaws through.
-  min-confidence: 0.65
-  min-rr-ratio: 1.5
+  min-confidence: 0.70
+  min-rr-ratio: 2.1
   risk-per-trade-pct: 0.2       # 0.2% of capital per trade
+  stop-cooldown-min: 20         # block re-entry on a symbol after a stop-loss exit
+
+# ── F&O (Index Options) ───────────────────────────────────────
+# When enabled, signals on the indices below are executed as LONG option paper
+# orders on the option chain: BUY index → buy CE, SELL index → buy PE, at the
+# ATM strike (± itm-offset-steps) of the nearest expiry. Exit decisions run on
+# the underlying index levels; fills use the option premium LTP (Groww FNO),
+# with a Black-Scholes synthetic fallback when no live quote is available.
+# Lot sizes / strike steps / expiry days follow NSE circulars — update HERE,
+# not in code, when the exchange revises them.
+# ── Trading engines (equity + F&O run in parallel) ────────────
+# Each live scan runs an EQUITY pass then an F&O pass, each with its own symbols,
+# its own strategies (strategy_config.segment), and its own order tables
+# (equity → open_position/trade_log, F&O → fno_open_position/fno_trade_log).
+# Toggle either independently: both on = run both; turn one off to run one only.
+# The F&O pass also requires fno.enabled below (the option-conversion master switch).
+trading:
+  equity:
+    enabled: true
+  fno:
+    enabled: true
+
+fno:
+  enabled: true
+  risk-per-trade-pct: 0.75      # target % of capital risked per option trade (premium risk)
+  max-risk-per-trade-pct: 2.5   # hard cap — 1 lot is the minimum position and may exceed the target
+  max-lots-per-trade: 4
+  max-premium-per-trade: 30000  # cap on total premium outlay ₹
+  premium-hard-stop-pct: 35     # exit if premium drops this % below entry (theta/IV guard)
+  itm-offset-steps: 0           # 0 = ATM; 1 = one strike in-the-money (higher delta)
+  synthetic-iv: 0.14            # IV for the synthetic pricing fallback
+  risk-free-rate: 0.065
+  expiry-day-entry-cutoff-min: 90   # no fresh entries within N min of close on expiry day
+  underlyings:
+    NIFTY:      { lot-size: 75,  strike-step: 50,  expiry-day: TUESDAY, weekly-expiry: true }
+    BANKNIFTY:  { lot-size: 35,  strike-step: 100, expiry-day: TUESDAY, weekly-expiry: false }
+    FINNIFTY:   { lot-size: 65,  strike-step: 50,  expiry-day: TUESDAY, weekly-expiry: false }
+    MIDCPNIFTY: { lot-size: 140, strike-step: 25,  expiry-day: TUESDAY, weekly-expiry: false }
 
 # ── Paper Broker ──────────────────────────────────────────────
 broker:
   slippage-pct: 0.02            # 0.02% price slippage on fills
-  # Trailing/breakeven stop — stops winners turning into losers and locks profit
-  # when a winner reverses before the (far) target. Attacks realized-RR < designed-RR.
-  trailing:
-    enabled: true
-    breakeven-trigger-r: 1.0    # at +1R favorable, move stop to entry (breakeven)
-    trail-start-r: 1.5          # beyond +1.5R, start trailing
-    trail-giveback-r: 1.0       # trail locks (peakR − 1.0)R of profit
 
 # ── Trading Charges (India cash equity) ──────────────────────
 charges:
@@ -118,6 +167,14 @@ charges:
   sebi-rate: 0.000001
   stamp-intraday-buy-rate: 0.00003
   stamp-delivery-buy-rate: 0.00015
+  # ── F&O (index options) — charged on PREMIUM value ──
+  fno:
+    brokerage-flat: 20          # ₹20 flat per order (discount-broker model)
+    stt-sell-rate: 0.001        # STT 0.1% on sell-side premium
+    exchange-rate: 0.0003503    # NSE options transaction charge
+    sebi-rate: 0.000001
+    gst-rate: 0.18
+    stamp-buy-rate: 0.00003     # 0.003% on buy-side premium
 
 # ── Database ──────────────────────────────────────────────────
 # Trade data is persisted to PostgreSQL (see spring.datasource above).
@@ -134,8 +191,8 @@ charges:
 #   4. Paste values below:
 notification:
   telegram:
-    bot-token: ""
-    chat-id: ""          # e.g. -1001234567890
+    bot-token: "${TELEGRAM_BOT_TOKEN:}"
+    chat-id: "${TELEGRAM_CHAT_ID:}"          # e.g. -1001234567890
 
 # ── Health Checks ─────────────────────────────────────────────
 health:

@@ -18,7 +18,7 @@ import org.springframework.scheduling.annotation.EnableScheduling;
  *   service/     — all service interfaces (contracts)
  *   service/impl — all service implementations (one impl per interface)
  *   controller/  — REST controllers (one per domain)
- *   scheduler/   — @Scheduled scan loop and EOD job
+ *   scheduler/   — @Scheduled scan loop and EOD jobcre
  *   config/      — Spring bean configuration
  *   util/        — Indicator (pure-static TA calculations)
  */

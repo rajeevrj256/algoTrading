@@ -6,6 +6,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import javax.persistence.*;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 
 @Data
@@ -66,6 +67,46 @@ public class OpenPositionEntity {
 
     @Column(name = "why_full")
     private String whyFull;
+
+    // ── trail state (so restarts don't lose the ratchet) ──
+    @Column(name = "initial_stop")
+    private double initialStop;
+
+    @Column(name = "peak_price")
+    private double peakPrice;
+
+    // ── F&O (index option) fields ──
+    @Column(name = "instrument_type")
+    private String instrumentType;
+
+    private String underlying;
+
+    @Column(name = "option_type")
+    private String optionType;
+
+    private double strike;
+
+    private LocalDate expiry;
+
+    @Column(name = "lot_size")
+    private int lotSize;
+
+    private int lots;
+
+    @Column(name = "underlying_entry")
+    private double underlyingEntry;
+
+    @Column(name = "underlying_stop")
+    private double underlyingStop;
+
+    @Column(name = "underlying_initial_stop")
+    private double underlyingInitialStop;
+
+    @Column(name = "underlying_target")
+    private double underlyingTarget;
+
+    @Column(name = "underlying_peak")
+    private double underlyingPeak;
 
     @Column(name = "created_at")
     private LocalDateTime createdAt;

@@ -9,6 +9,9 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
@@ -45,7 +48,11 @@ public class InternalHealthServiceImpl implements HealthService {
     private final SheetsService       sheetsService;
     private final NotificationService notificationService;
     private final HealthCheckLogRepository healthCheckLogRepository;
+    private final ObjectProvider<KafkaTemplate<String, Object>> kafkaTemplateProvider;
     private final ObjectMapper objectMapper = new ObjectMapper();
+
+    @Value("${app.kafka.enabled:false}")
+    private boolean kafkaEnabled;
 
     private final AtomicInteger checkCount = new AtomicInteger(0);
     private volatile HealthReportDTO lastReport;
@@ -75,6 +82,7 @@ public class InternalHealthServiceImpl implements HealthService {
         items.add(checkRisk());
         items.add(checkBroker());
         items.add(checkSheets());
+        items.add(checkKafka());
         items.add(checkTelegram());
         items.add(checkMarketHours());
 
@@ -129,13 +137,14 @@ public class InternalHealthServiceImpl implements HealthService {
     }
 
     private CheckItemDTO checkDataFeed() {
+        String provider = dataFeedService.getProviderName();
         try {
             boolean ok = dataFeedService.isAvailable();
-            return item("Data Feed (Yahoo Finance)", ok ? "OK" : "FAIL",
-                    ok ? "Feed is reachable" : "Yahoo Finance unreachable — check internet",
+            return item("Data Feed (" + provider + ")", ok ? "OK" : "FAIL",
+                    ok ? "Feed is reachable" : provider + " unreachable — check internet/credentials",
                     ok ? "UP" : "DOWN");
         } catch (Exception e) {
-            return item("Data Feed (Yahoo Finance)", "FAIL", e.getMessage(), "ERROR");
+            return item("Data Feed (" + provider + ")", "FAIL", e.getMessage(), "ERROR");
         }
     }
 
@@ -155,9 +164,11 @@ public class InternalHealthServiceImpl implements HealthService {
 
     private CheckItemDTO checkStrategies() {
         List<String> loaded = strategyService.listStrategies();
-        boolean ok = loaded.size() == 6;
+        int expected = com.algotrading.enums.StrategyType.values().length;
+        boolean ok = loaded.size() == expected;
         return item("Strategy Engine", ok ? "OK" : "WARN",
-                ok ? "All 5 strategies loaded" : "Expected 6, loaded " + loaded.size(),
+                ok ? "All " + expected + " strategies loaded"
+                   : "Expected " + expected + ", loaded " + loaded.size(),
                 String.join(", ", loaded));
     }
 
@@ -187,6 +198,33 @@ public class InternalHealthServiceImpl implements HealthService {
                 conn ? "Connected — " + sheetsService.getSheetUrl()
                      : "Not connected — check datasource config",
                 conn ? "CONNECTED" : "DOWN");
+    }
+
+    /**
+     * Kafka health. Non-blocking on purpose: @Scheduled jobs share one thread, so a
+     * blocking broker round-trip here could stall exit checks/scans. We report the
+     * config-level state (enabled + KafkaTemplate wired), not a live broker probe.
+     *   DISABLED (WARN) — non-critical events use the synchronous fallback (valid mode).
+     *   ENABLED + template present (OK) — publishes go to Kafka.
+     *   ENABLED + no template (FAIL) — misconfigured; async publishes would be dropped.
+     */
+    private CheckItemDTO checkKafka() {
+        if (!kafkaEnabled) {
+            return item("Kafka", "WARN",
+                    "Disabled — trade logs / candle ingest / alerts use the synchronous fallback",
+                    "DISABLED");
+        }
+        KafkaTemplate<String, Object> template = kafkaTemplateProvider.getIfAvailable();
+        if (template == null) {
+            return item("Kafka", "FAIL",
+                    "Enabled but no KafkaTemplate bean — async publishes are dropped (check KafkaConfig / brokers)",
+                    "MISCONFIGURED");
+        }
+        String servers = String.valueOf(template.getProducerFactory().getConfigurationProperties()
+                .get("bootstrap.servers"));
+        return item("Kafka", "OK",
+                "Enabled — producer configured (broker not round-tripped to keep the check non-blocking)",
+                servers);
     }
 
     private CheckItemDTO checkTelegram() {

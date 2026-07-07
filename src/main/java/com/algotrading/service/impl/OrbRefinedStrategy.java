@@ -69,7 +69,9 @@ public class OrbRefinedStrategy implements TradingStrategy {
 
         double avgVol = Indicator.rollingAvgVolume(candles, 20);
         double volRatio = avgVol > 0 ? last.getVolume() / avgVol : 0;
-        if (volRatio < 1.5) return Optional.empty();
+        // Index candles report zero volume — skip the volume confirm there instead
+        // of blocking every index breakout.
+        if (avgVol > 0 && volRatio < 1.5) return Optional.empty();
 
         double[] closes = Indicator.closes(candles);
         double rsi = Indicator.rsi(closes, 14)[n - 1];

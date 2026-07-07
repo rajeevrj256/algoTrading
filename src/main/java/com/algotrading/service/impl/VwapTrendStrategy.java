@@ -64,10 +64,13 @@ public class VwapTrendStrategy implements TradingStrategy {
         boolean bounceUp = last.getClose() > last.getOpen() && last.getClose() > prev.getClose();
         boolean bounceDn = last.getClose() < last.getOpen() && last.getClose() < prev.getClose();
 
+        // Index candles report zero volume — the volume confirm is neutral there.
+        boolean volOk = avgVol <= 0 || volRatio >= 1.0;
+
         // ── LONG — pullback to rising VWAP ──
         boolean upTrend  = price > vw && ema9[i] > ema21[i] && slope > 0;
         boolean pulledToVwap = Math.min(last.getLow(), prev.getLow()) <= Math.max(vw, ema9[i]) * 1.0015;
-        if (upTrend && pulledToVwap && bounceUp && price > vw && volRatio >= 1.0) {
+        if (upTrend && pulledToVwap && bounceUp && price > vw && volOk && rsi < 70) {
             double stop = Indicator.round2(Math.min(last.getLow(), prev.getLow()) - 0.1 * atr);
             double risk = price - stop;
             if (risk <= 0) return Optional.empty();
@@ -80,7 +83,7 @@ public class VwapTrendStrategy implements TradingStrategy {
         // ── SHORT — bounce into falling VWAP ──
         boolean dnTrend = price < vw && ema9[i] < ema21[i] && slope < 0;
         boolean ralliedToVwap = Math.max(last.getHigh(), prev.getHigh()) >= Math.min(vw, ema9[i]) * 0.9985;
-        if (dnTrend && ralliedToVwap && bounceDn && price < vw && volRatio >= 1.0) {
+        if (dnTrend && ralliedToVwap && bounceDn && price < vw && volOk && rsi > 30) {
             double stop = Indicator.round2(Math.max(last.getHigh(), prev.getHigh()) + 0.1 * atr);
             double risk = stop - price;
             if (risk <= 0) return Optional.empty();

@@ -1,9 +1,11 @@
 package com.algotrading.service.impl;
 
+import com.algotrading.config.FnoProperties;
 import com.algotrading.dto.IntradaySymbolDTO;
 import com.algotrading.entity.IntradaySymbolEntity;
 import com.algotrading.repository.IntradaySymbolRepository;
 import com.algotrading.service.IntradaySymbolService;
+import com.algotrading.util.Symbols;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -27,6 +29,7 @@ public class IntradaySymbolServiceImpl implements IntradaySymbolService {
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
 
     private final IntradaySymbolRepository intradaySymbolRepository;
+    private final FnoProperties fnoProperties;
 
     @Value("${app.symbols:RELIANCE,TCS,INFY,HDFCBANK,ICICIBANK,AXISBANK,WIPRO,SBIN}")
     private String fallbackSymbolsStr;
@@ -118,6 +121,11 @@ public class IntradaySymbolServiceImpl implements IntradaySymbolService {
         refreshCache();
     }
 
+    /**
+     * Equity engine symbols: the DB shortlist (or app.symbols fallback), with any
+     * index symbols filtered OUT — indices are traded by the F&O engine pass via
+     * {@link #getFnoUnderlyings()}, so they must not also trade as cash here.
+     */
     private List<String> reloadCache(LocalDateTime now) {
         List<IntradaySymbolEntity> entities = intradaySymbolRepository.findEligibleSymbols(now);
         Set<String> resolved = new LinkedHashSet<>();
@@ -132,9 +140,25 @@ public class IntradaySymbolServiceImpl implements IntradaySymbolService {
             log.warn("[Symbols] No active DB shortlist found — using fallback app.symbols list");
         }
 
-        cachedSymbols = Collections.unmodifiableList(new ArrayList<>(resolved));
+        Set<String> equityOnly = new LinkedHashSet<>();
+        for (String sym : resolved) {
+            if (Symbols.canonicalIndex(sym) == null) equityOnly.add(sym);   // drop indices → F&O pass owns them
+        }
+
+        cachedSymbols = Collections.unmodifiableList(new ArrayList<>(equityOnly));
         cacheExpiresAt = now.plusMinutes(cacheTtlMinutes);
         return cachedSymbols;
+    }
+
+    @Override
+    public List<String> getFnoUnderlyings() {
+        Set<String> underlyings = new LinkedHashSet<>();
+        if (fnoProperties != null) {
+            for (String key : fnoProperties.getUnderlyings().keySet()) {
+                if (key != null && !key.trim().isEmpty()) underlyings.add(key.trim().toUpperCase());
+            }
+        }
+        return new ArrayList<>(underlyings);
     }
 
     private List<String> parseFallbackSymbols() {

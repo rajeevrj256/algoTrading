@@ -2,11 +2,13 @@ package com.algotrading.service;
 
 import com.algotrading.dto.CandleDTO;
 import com.algotrading.dto.TradeSignalDTO;
+import com.algotrading.enums.Segment;
 import com.algotrading.enums.StrategyType;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * StrategyService — orchestrates all registered TradingStrategy beans.
@@ -20,6 +22,18 @@ public interface StrategyService {
      * Returns the first signal that fires (strategies run in priority order).
      */
     Optional<TradeSignalDTO> runStrategies(String symbol, List<CandleDTO> candles);
+
+    /**
+     * Confluence run limited to the strategies assigned to {@code segment} (EQUITY or
+     * FNO); a strategy tagged BOTH runs in either. Used by the parallel engine passes.
+     */
+    Optional<TradeSignalDTO> runStrategies(String symbol, List<CandleDTO> candles, Segment segment);
+
+    /**
+     * Registered strategy types assigned to {@code segment} (segment or BOTH),
+     * regardless of enabled state — used by the per-segment backtest to pick its set.
+     */
+    Set<StrategyType> strategiesForSegment(Segment segment);
 
     /**
      * Run a specific named strategy only.

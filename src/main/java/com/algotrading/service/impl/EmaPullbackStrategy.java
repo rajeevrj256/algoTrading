@@ -32,6 +32,13 @@ public class EmaPullbackStrategy implements TradingStrategy {
     private static final double TARGET_R = 2.5;
     private static final double MIN_MOVE_PCT = 0.4;
 
+    /**
+     * Minimum EMA9↔EMA50 spread (% of price) for the stack to count as a REAL trend.
+     * A technically-stacked but paper-thin spread (e.g. 0.06% on FINNIFTY, 2026-07-07)
+     * is flat chop wearing a trend costume — both F&O losses that day entered on it.
+     */
+    private static final double MIN_STACK_SPREAD_PCT = 0.15;
+
     @Override public StrategyType getType() { return StrategyType.EMA_PULLBACK; }
     @Override public int minCandles()       { return 55; }
 
@@ -61,8 +68,12 @@ public class EmaPullbackStrategy implements TradingStrategy {
         boolean bounceUp = last.getClose() > last.getOpen() && last.getClose() > e9;
         boolean bounceDn = last.getClose() < last.getOpen() && last.getClose() < e9;
 
+        // Trend-quality gate: the stack must have real separation, not a flat-market technicality.
+        double stackSpreadPct = Math.abs(e9 - e50) / price * 100.0;
+        if (stackSpreadPct < MIN_STACK_SPREAD_PCT) return Optional.empty();
+
         // ── LONG — stacked up, pullback to EMA21 holds ──
-        if (e9 > e21 && e21 > e50 && price > e50) {
+        if (e9 > e21 && e21 > e50 && price > e50 && rsi < 70) {
             boolean pulledToEma21 = Math.min(last.getLow(), prev.getLow()) <= e21 * 1.002;
             if (pulledToEma21 && bounceUp) {
                 double stop = Indicator.round2(Math.min(Math.min(last.getLow(), prev.getLow()), e21) - 0.1 * atr);
@@ -76,7 +87,7 @@ public class EmaPullbackStrategy implements TradingStrategy {
         }
 
         // ── SHORT — stacked down, pullback to EMA21 fails ──
-        if (e9 < e21 && e21 < e50 && price < e50) {
+        if (e9 < e21 && e21 < e50 && price < e50 && rsi > 30) {
             boolean ralliedToEma21 = Math.max(last.getHigh(), prev.getHigh()) >= e21 * 0.998;
             if (ralliedToEma21 && bounceDn) {
                 double stop = Indicator.round2(Math.max(Math.max(last.getHigh(), prev.getHigh()), e21) + 0.1 * atr);

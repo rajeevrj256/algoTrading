@@ -26,6 +26,10 @@ public class StrategyConfigEntity {
     @Builder.Default
     private boolean enabled = true;
 
+    /** Which engine runs this strategy: EQUITY, FNO, or BOTH (Segment enum name). */
+    @Builder.Default
+    private String segment = "EQUITY";
+
     @Column(name = "updated_at")
     private LocalDateTime updatedAt;
 

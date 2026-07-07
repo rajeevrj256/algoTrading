@@ -34,6 +34,15 @@ public interface BrokerService {
     List<PositionDTO> checkExits(String symbol, double currentPrice);
 
     /**
+     * Exit check for an INDEX_OPTION position. Stop/target/trailing decisions run
+     * on the UNDERLYING index price (faithful to the strategy's levels); the fill
+     * happens at the option LTP. A premium-frame stop (delta-mapped + hard stop)
+     * guards against theta/IV bleed. Returns the closed position, or null if the
+     * position stays open / is unknown.
+     */
+    PositionDTO checkOptionExit(String positionId, double underlyingPrice, double optionLtp);
+
+    /**
      * End-of-day: close every remaining open position at the given price.
      */
     List<PositionDTO> squareOffAll(double currentPrice);

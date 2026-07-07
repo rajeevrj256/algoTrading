@@ -4,8 +4,10 @@ import com.algotrading.dto.DailySummaryDTO;
 import com.algotrading.dto.RiskValidationDTO;
 import com.algotrading.dto.StrategyExpectancyDTO;
 import com.algotrading.dto.TradeSignalDTO;
+import com.algotrading.entity.FnoTradeLogEntity;
 import com.algotrading.entity.TradeLogEntity;
 import com.algotrading.model.DailyStats;
+import com.algotrading.repository.FnoTradeLogRepository;
 import com.algotrading.repository.TradeLogRepository;
 import com.algotrading.service.RiskService;
 import lombok.RequiredArgsConstructor;
@@ -52,7 +54,12 @@ public class RiskServiceImpl implements RiskService {
     @Value("${risk.min-rr-ratio:1.5}")
     private double minRrRatio;
 
+    /** Options are lot-lumpy: one lot can carry more risk than the 1% equity cap. */
+    @Value("${fno.max-risk-per-trade-pct:2.5}")
+    private double fnoMaxRiskPct;
+
     private final TradeLogRepository tradeLogRepository;
+    private final FnoTradeLogRepository fnoTradeLogRepository;
 
     private DailyStats stats = new DailyStats(LocalDate.now(IST).toString());
 
@@ -66,14 +73,19 @@ public class RiskServiceImpl implements RiskService {
             for (TradeLogEntity trade : trades) {
                 stats.record(trade.getPnl());
             }
+            // F&O trades live in a separate table — include them in today's P&L / circuit.
+            List<FnoTradeLogEntity> fnoTrades = fnoTradeLogRepository.findByTradeDate(LocalDate.now(IST));
+            for (FnoTradeLogEntity trade : fnoTrades) {
+                stats.record(trade.getPnl());
+            }
 
             if (stats.getTotalPnl().get() <= -dailyMaxLoss) {
                 stats.getCircuitTripped().set(true);
             }
 
-            if (!trades.isEmpty()) {
-                log.info("[Risk] Restored {} closed trade(s) for {} | P&L=₹{} | Trades={}",
-                        trades.size(), today,
+            if (!trades.isEmpty() || !fnoTrades.isEmpty()) {
+                log.info("[Risk] Restored {} equity + {} F&O closed trade(s) for {} | P&L=₹{} | Trades={}",
+                        trades.size(), fnoTrades.size(), today,
                         String.format("%.2f", stats.getTotalPnl().get()),
                         stats.getTrades().get());
             }
@@ -115,10 +127,13 @@ public class RiskServiceImpl implements RiskService {
         if (signal.getEntryPrice() <= 0)
             return denied("Invalid entry price: " + signal.getEntryPrice());
 
+        boolean isOption = signal.getInstrumentType() == com.algotrading.enums.InstrumentType.INDEX_OPTION;
         double riskAmt   = Math.abs(signal.getEntryPrice() - signal.getStopLoss()) * signal.getQuantity();
-        double maxAllowed = capital * 1.0 / 100;
+        double maxAllowedPct = isOption ? fnoMaxRiskPct : 1.0;
+        double maxAllowed = capital * maxAllowedPct / 100;
         if (riskAmt > maxAllowed)
-            return denied(String.format("Risk ₹%.2f exceeds hard cap ₹%.2f (1%% capital)", riskAmt, maxAllowed));
+            return denied(String.format("Risk ₹%.2f exceeds hard cap ₹%.2f (%.1f%% capital)",
+                    riskAmt, maxAllowed, maxAllowedPct));
 
         return RiskValidationDTO.builder()
                 .approved(true).reason("Signal validation passed")
@@ -181,7 +196,14 @@ public class RiskServiceImpl implements RiskService {
     public List<StrategyExpectancyDTO> getStrategyExpectancy(int days) {
         int window = days > 0 ? days : 7;
         List<StrategyExpectancyDTO> result = new ArrayList<>();
-        for (Object[] row : tradeLogRepository.findStrategyExpectancy(window)) {
+        addExpectancyRows(tradeLogRepository.findStrategyExpectancy(window), result);      // equity
+        addExpectancyRows(fnoTradeLogRepository.findStrategyExpectancy(window), result);   // F&O
+        result.sort((a, b) -> Double.compare(b.getAvgPnl(), a.getAvgPnl()));
+        return result;
+    }
+
+    private void addExpectancyRows(List<Object[]> rows, List<StrategyExpectancyDTO> result) {
+        for (Object[] row : rows) {
             long trades = lng(row[1]);
             long wins   = lng(row[2]);
             double winRate = trades > 0 ? r2(100.0 * wins / trades) : 0;
@@ -199,7 +221,6 @@ public class RiskServiceImpl implements RiskService {
                     .worstTrade(r2(dbl(row[9])))
                     .build());
         }
-        return result;
     }
 
     private static String str(Object o) { return o == null ? "UNKNOWN" : o.toString(); }

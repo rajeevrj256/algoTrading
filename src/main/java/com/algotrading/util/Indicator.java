@@ -143,6 +143,57 @@ public class Indicator {
         return new SupertrendResult(st, dir);
     }
 
+    // ── ADX (Wilder) ─────────────────────────────────────────
+
+    /**
+     * Average Directional Index — trend-strength regime filter.
+     * Values ≥ ~20-25 = trending; below = chop. Volume-free, so it works on
+     * index candles (which report zero volume).
+     */
+    public static double[] adx(List<CandleDTO> candles, int period) {
+        int n = candles.size();
+        double[] res = new double[n];
+        if (n < period + 1) return res;
+
+        double[] tr = new double[n], plusDm = new double[n], minusDm = new double[n];
+        for (int i = 1; i < n; i++) {
+            double h = candles.get(i).getHigh(), l = candles.get(i).getLow();
+            double ph = candles.get(i - 1).getHigh(), pl = candles.get(i - 1).getLow();
+            double pc = candles.get(i - 1).getClose();
+            tr[i] = Math.max(h - l, Math.max(Math.abs(h - pc), Math.abs(l - pc)));
+            double up = h - ph, dn = pl - l;
+            plusDm[i]  = (up > dn && up > 0) ? up : 0;
+            minusDm[i] = (dn > up && dn > 0) ? dn : 0;
+        }
+
+        // Wilder smoothing
+        double smTr = 0, smPlus = 0, smMinus = 0;
+        for (int i = 1; i <= period; i++) { smTr += tr[i]; smPlus += plusDm[i]; smMinus += minusDm[i]; }
+
+        double[] dx = new double[n];
+        for (int i = period; i < n; i++) {
+            if (i > period) {
+                smTr    = smTr - smTr / period + tr[i];
+                smPlus  = smPlus - smPlus / period + plusDm[i];
+                smMinus = smMinus - smMinus / period + minusDm[i];
+            }
+            double pdi = smTr > 0 ? 100 * smPlus / smTr : 0;
+            double mdi = smTr > 0 ? 100 * smMinus / smTr : 0;
+            double sum = pdi + mdi;
+            dx[i] = sum > 0 ? 100 * Math.abs(pdi - mdi) / sum : 0;
+        }
+
+        // ADX = Wilder-smoothed DX
+        int first = Math.min(2 * period - 1, n - 1);
+        double adxSeed = 0;
+        for (int i = period; i <= first; i++) adxSeed += dx[i];
+        res[first] = adxSeed / period;
+        for (int i = first + 1; i < n; i++) {
+            res[i] = (res[i - 1] * (period - 1) + dx[i]) / period;
+        }
+        return res;
+    }
+
     // ── Rolling avg volume (excludes last/current candle) ────
 
     public static double rollingAvgVolume(List<CandleDTO> candles, int period) {

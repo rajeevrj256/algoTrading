@@ -1,5 +1,7 @@
 package com.algotrading.dto;
 
+import com.algotrading.enums.InstrumentType;
+import com.algotrading.enums.OptionType;
 import com.algotrading.enums.PositionStatus;
 import com.algotrading.enums.SignalType;
 import com.algotrading.enums.StrategyType;
@@ -9,6 +11,7 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 
 @Data
@@ -48,4 +51,25 @@ public class PositionDTO {
     private String         indVolRatio;
     private String         indAtr;
     private String         indExtra;
+
+    // ── F&O (index option) fields — null/0 for cash-equity positions ──
+    // symbol/entryPrice/stopLoss/target are in PREMIUM terms for options.
+    // Exit DECISIONS run on the underlying index frame below; fills happen at
+    // the option LTP. underlyingStop trails; underlyingInitialStop is immutable 1R.
+    private InstrumentType instrumentType;
+    private String         underlying;             // scan symbol of the index (e.g. NIFTY_50)
+    private OptionType     optionType;
+    private double         strike;
+    private LocalDate      expiry;
+    private int            lotSize;
+    private int            lots;
+    private double         underlyingEntry;
+    private double         underlyingStop;         // live index-frame stop (trailing moves this)
+    private double         underlyingInitialStop;  // original index-frame stop; defines 1R
+    private double         underlyingTarget;
+    private double         underlyingPeak;         // best favorable index price; drives the trail
+
+    public boolean isOption() {
+        return instrumentType == InstrumentType.INDEX_OPTION;
+    }
 }

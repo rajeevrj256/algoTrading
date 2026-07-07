@@ -97,6 +97,24 @@ public class TradeLogEntity {
     @Column(name = "why_full")
     private String whyFull;
 
+    // ── F&O (index option) fields ──
+    @Column(name = "instrument_type")
+    private String instrumentType;
+
+    private String underlying;
+
+    @Column(name = "option_type")
+    private String optionType;
+
+    private double strike;
+
+    private LocalDate expiry;
+
+    @Column(name = "lot_size")
+    private int lotSize;
+
+    private int lots;
+
     @Builder.Default
     private String status = "CLOSED";
 

@@ -5,6 +5,7 @@ import com.algotrading.dto.CandleDTO;
 import com.algotrading.dto.DailySummaryDTO;
 import com.algotrading.dto.PositionDTO;
 import com.algotrading.service.CandleHistoryService;
+import com.algotrading.service.FnoCandleHistoryService;
 import com.algotrading.service.NotificationService;
 import com.algotrading.service.SheetsService;
 import lombok.RequiredArgsConstructor;
@@ -32,6 +33,7 @@ public class TradingEventPublisher {
     private static final String TOPIC_REPORTING     = "algotrading.trade-reporting";
     private static final String TOPIC_NOTIFICATIONS = "algotrading.trade-notifications";
     private static final String TOPIC_CANDLES       = "algotrading.candle-ingest";
+    private static final String TOPIC_FNO_CANDLES   = "algotrading.fno-candle-ingest";
 
     @Value("${app.kafka.enabled:false}")
     private boolean kafkaEnabled;
@@ -40,10 +42,11 @@ public class TradingEventPublisher {
     private final SheetsService sheetsService;
     private final NotificationService notificationService;
     private final CandleHistoryService candleHistoryService;
+    private final FnoCandleHistoryService fnoCandleHistoryService;
 
     // ── Candle ingest (→ CandleHistoryService / candle_history) ─
 
-    /** Persist freshly-fetched candles. Fire-and-forget; falls back to direct save. */
+    /** Persist freshly-fetched equity/index candles. Fire-and-forget; falls back to direct save. */
     public void publishCandles(String symbol, List<CandleDTO> candles) {
         if (symbol == null || candles == null || candles.isEmpty()) return;
         if (!shouldUseKafka()) {
@@ -56,6 +59,25 @@ public class TradingEventPublisher {
                 .timestamp(LocalDateTime.now())
                 .build();
         send(TOPIC_CANDLES, symbol, event);
+    }
+
+    /**
+     * Persist freshly-fetched F&O (option premium) candles to fno_candle_history.
+     * Same async-via-Kafka rule as equity candles — live never blocks on the DB write;
+     * falls back to a direct save when Kafka is disabled.
+     */
+    public void publishFnoCandles(String symbol, List<CandleDTO> candles) {
+        if (symbol == null || candles == null || candles.isEmpty()) return;
+        if (!shouldUseKafka()) {
+            fnoCandleHistoryService.saveAll(symbol, candles);
+            return;
+        }
+        CandleIngestEvent event = CandleIngestEvent.builder()
+                .symbol(symbol)
+                .candles(candles)
+                .timestamp(LocalDateTime.now())
+                .build();
+        send(TOPIC_FNO_CANDLES, symbol, event);
     }
 
     // ── Reporting events (→ SheetsService / PostgreSQL) ──────

@@ -4,12 +4,14 @@ import com.algotrading.dto.PositionDTO;
 import com.algotrading.dto.TradeSignalDTO;
 import com.algotrading.enums.PositionStatus;
 import com.algotrading.enums.SignalType;
+import com.algotrading.entity.FnoTradeLogEntity;
 import com.algotrading.entity.TradeLogEntity;
 import com.algotrading.model.Order;
 import com.algotrading.model.TradeCharges;
 import com.algotrading.service.BrokerService;
 import com.algotrading.service.ChargesService;
 import com.algotrading.service.SheetsService;
+import com.algotrading.repository.FnoTradeLogRepository;
 import com.algotrading.repository.TradeLogRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -57,6 +59,7 @@ public class PaperBrokerServiceImpl implements BrokerService {
     private final ChargesService chargesService;
     private final SheetsService sheetsService;
     private final TradeLogRepository tradeLogRepository;
+    private final FnoTradeLogRepository fnoTradeLogRepository;
 
     private final Map<String, PositionDTO> openPositions   = new ConcurrentHashMap<>();
     private final List<PositionDTO>        closedPositions = Collections.synchronizedList(new ArrayList<>());
@@ -138,6 +141,18 @@ public class PaperBrokerServiceImpl implements BrokerService {
                 .indRsi(signal.getIndRsi()).indEmaGap(signal.getIndEmaGap())
                 .indVwapDev(signal.getIndVwapDev()).indVolRatio(signal.getIndVolRatio())
                 .indAtr(signal.getIndAtr()).indExtra(signal.getIndExtra())
+                .instrumentType(signal.getInstrumentType())
+                .underlying(signal.getUnderlying())
+                .optionType(signal.getOptionType())
+                .strike(signal.getStrike())
+                .expiry(signal.getExpiry())
+                .lotSize(signal.getLotSize())
+                .lots(signal.getLots())
+                .underlyingEntry(signal.getUnderlyingEntry())
+                .underlyingStop(signal.getUnderlyingStop())
+                .underlyingInitialStop(signal.getUnderlyingStop())
+                .underlyingTarget(signal.getUnderlyingTarget())
+                .underlyingPeak(signal.getUnderlyingEntry())
                 .build();
 
         openPositions.put(posId, pos);
@@ -157,7 +172,8 @@ public class PaperBrokerServiceImpl implements BrokerService {
         }
         double roundedExitPrice = r2(exitPrice);
         TradeCharges charges = chargesService.calculate(
-                pos.getSignal(), pos.getEntryPrice(), roundedExitPrice, pos.getQuantity());
+                pos.getSignal(), pos.getEntryPrice(), roundedExitPrice, pos.getQuantity(),
+                pos.getInstrumentType());
         double pnlPct = pos.getEntryPrice() > 0 && pos.getQuantity() > 0
                 ? charges.getNetPnl() / (pos.getEntryPrice() * pos.getQuantity()) * 100
                 : 0;
@@ -184,6 +200,7 @@ public class PaperBrokerServiceImpl implements BrokerService {
     public List<PositionDTO> checkExits(String symbol, double currentPrice) {
         List<PositionDTO> forSymbol = openPositions.values().stream()
                 .filter(p -> p.getSymbol().equals(symbol))
+                .filter(p -> !p.isOption())   // option exits go through checkOptionExit
                 .collect(Collectors.toList());
 
         List<PositionDTO> closed = new ArrayList<>();
@@ -195,6 +212,80 @@ public class PaperBrokerServiceImpl implements BrokerService {
             if (c != null) closed.add(c);
         }
         return closed;
+    }
+
+    // ── checkOptionExit (INDEX_OPTION) ────────────────────────
+
+    /**
+     * Option exits: decisions on the UNDERLYING index frame (strategy levels),
+     * fill at the option LTP (minus slippage — exits are always sells since all
+     * option positions are long). Premium stop (delta-mapped + hard stop baked
+     * into stopLoss at entry) guards theta/IV bleed even when the index is flat.
+     */
+    @Override
+    public PositionDTO checkOptionExit(String positionId, double underlyingPrice, double optionLtp) {
+        PositionDTO p = openPositions.get(positionId);
+        if (p == null || !p.isOption()) return null;
+
+        applyUnderlyingTrailingStop(p, underlyingPrice);
+
+        // CE profits when the index rises; PE when it falls.
+        boolean longFrame = p.getOptionType() == com.algotrading.enums.OptionType.CE;
+        double fill = r2(optionLtp * (1 - slippagePct / 100));   // exit = sell the option
+
+        String reason = null;
+        if (longFrame ? underlyingPrice >= p.getUnderlyingTarget()
+                      : underlyingPrice <= p.getUnderlyingTarget()) {
+            reason = String.format("TARGET HIT (index %.2f ≥|≤ %.2f) @ ₹%.2f",
+                    underlyingPrice, p.getUnderlyingTarget(), fill);
+        } else if (longFrame ? underlyingPrice <= p.getUnderlyingStop()
+                             : underlyingPrice >= p.getUnderlyingStop()) {
+            reason = String.format("%s (index %.2f) @ ₹%.2f",
+                    underlyingStopLabel(p, longFrame), underlyingPrice, fill);
+        } else if (optionLtp <= p.getStopLoss()) {
+            reason = String.format("PREMIUM STOP @ ₹%.2f (theta/IV guard, stop ₹%.2f)", fill, p.getStopLoss());
+        }
+
+        if (reason == null) return null;
+        return closePosition(positionId, fill, reason);
+    }
+
+    /** Trailing/breakeven for option positions, computed in the underlying index frame. */
+    private void applyUnderlyingTrailingStop(PositionDTO p, double underlyingPrice) {
+        if (!trailingEnabled) return;
+
+        double entry = p.getUnderlyingEntry();
+        double initStop = p.getUnderlyingInitialStop() != 0 ? p.getUnderlyingInitialStop() : p.getUnderlyingStop();
+        double r = Math.abs(entry - initStop);
+        if (r <= 0) return;
+
+        boolean longFrame = p.getOptionType() == com.algotrading.enums.OptionType.CE;
+
+        double peak = p.getUnderlyingPeak() != 0 ? p.getUnderlyingPeak() : entry;
+        peak = longFrame ? Math.max(peak, underlyingPrice) : Math.min(peak, underlyingPrice);
+        p.setUnderlyingPeak(peak);
+
+        double peakR = longFrame ? (peak - entry) / r : (entry - peak) / r;
+        if (peakR < breakevenTriggerR) return;
+
+        double lockedR = peakR >= trailStartR ? Math.max(0.0, peakR - trailGivebackR) : 0.0;
+        double newStop = longFrame ? entry + lockedR * r : entry - lockedR * r;
+        newStop = r2(newStop);
+
+        // Only ever tighten.
+        if (longFrame) {
+            if (newStop > p.getUnderlyingStop()) p.setUnderlyingStop(newStop);
+        } else {
+            if (newStop < p.getUnderlyingStop()) p.setUnderlyingStop(newStop);
+        }
+    }
+
+    private String underlyingStopLabel(PositionDTO p, boolean longFrame) {
+        double stop = p.getUnderlyingStop();
+        double entry = p.getUnderlyingEntry();
+        boolean movedToProfit = longFrame ? stop > entry : stop < entry;
+        boolean atBreakeven = Math.abs(stop - entry) < 1e-9;
+        return movedToProfit ? "TRAIL STOP" : atBreakeven ? "BREAKEVEN STOP" : "STOP LOSS";
     }
 
     /**
@@ -302,8 +393,10 @@ public class PaperBrokerServiceImpl implements BrokerService {
 
     private int loadPersistedMaxPositionSequence() {
         try {
-            Integer maxSequence = tradeLogRepository.findMaxPositionSequence();
-            return maxSequence != null ? maxSequence : 0;
+            // POS-n is a single shared sequence across equity + F&O → max of both tables.
+            Integer equityMax = tradeLogRepository.findMaxPositionSequence();
+            Integer fnoMax = fnoTradeLogRepository.findMaxPositionSequence();
+            return Math.max(equityMax != null ? equityMax : 0, fnoMax != null ? fnoMax : 0);
         } catch (Exception e) {
             log.warn("[Broker] Failed to read historical max position id: {}", e.getMessage());
             return 0;
@@ -339,6 +432,13 @@ public class PaperBrokerServiceImpl implements BrokerService {
                     .stopLoss(trade.getStopLoss())
                     .target(trade.getTarget())
                     .quantity(trade.getQuantity())
+                    .instrumentType(parseInstrumentType(trade.getInstrumentType()))
+                    .underlying(trade.getUnderlying())
+                    .optionType(parseOptionType(trade.getOptionType()))
+                    .strike(trade.getStrike())
+                    .expiry(trade.getExpiry())
+                    .lotSize(trade.getLotSize())
+                    .lots(trade.getLots())
                     .signal(parseSignal(trade.getSide()))
                     .strategy(parseStrategy(trade.getStrategy()))
                     .entryTime(toDateTime(trade.getTradeDate(), trade.getTradeTime()))
@@ -373,6 +473,51 @@ public class PaperBrokerServiceImpl implements BrokerService {
                     .notes("Restored from trade_log")
                     .build());
 
+            maxCounter = Math.max(maxCounter, extractPositionNumber(positionId));
+        }
+
+        // F&O closed trades live in fno_trade_log — restore them too so today's summary
+        // and the POS-n counter stay whole across a restart.
+        List<FnoTradeLogEntity> fnoTrades = fnoTradeLogRepository.findByTradeDate(LocalDate.now(IST));
+        for (FnoTradeLogEntity trade : fnoTrades) {
+            String positionId = trade.getPositionId();
+            if (positionId == null || positionId.trim().isEmpty()) {
+                positionId = "HIST-FNO-" + trade.getId();
+            }
+            closedPositions.add(PositionDTO.builder()
+                    .positionId(positionId)
+                    .symbol(trade.getSymbol())
+                    .entryPrice(trade.getEntryPrice())
+                    .exitPrice(trade.getExitPrice())
+                    .stopLoss(trade.getStopLoss())
+                    .target(trade.getTarget())
+                    .quantity(trade.getQuantity())
+                    .instrumentType(parseInstrumentType(trade.getInstrumentType()))
+                    .underlying(trade.getUnderlying())
+                    .optionType(parseOptionType(trade.getOptionType()))
+                    .strike(trade.getStrike())
+                    .expiry(trade.getExpiry())
+                    .lotSize(trade.getLotSize())
+                    .lots(trade.getLots())
+                    .signal(parseSignal(trade.getSide()))
+                    .strategy(parseStrategy(trade.getStrategy()))
+                    .entryTime(toDateTime(trade.getTradeDate(), trade.getTradeTime()))
+                    .exitTime(trade.getCreatedAt())
+                    .grossPnl(r2(trade.getPnl() + trade.getCharges()))
+                    .charges(trade.getCharges())
+                    .pnl(trade.getPnl())
+                    .pnlPct(trade.getPnlPct())
+                    .status(PositionStatus.CLOSED)
+                    .exitReason(trade.getExitReason())
+                    .signalReason(trade.getSignalReason())
+                    .whyFull(trade.getWhyFull())
+                    .indRsi(trade.getIndRsi())
+                    .indEmaGap(trade.getIndEmaGap())
+                    .indVwapDev(trade.getIndVwapDev())
+                    .indVolRatio(trade.getIndVolRatio())
+                    .indAtr(trade.getIndAtr())
+                    .indExtra(trade.getIndExtra())
+                    .build());
             maxCounter = Math.max(maxCounter, extractPositionNumber(positionId));
         }
 
@@ -415,6 +560,24 @@ public class PaperBrokerServiceImpl implements BrokerService {
         if (strategy == null) return null;
         try {
             return com.algotrading.enums.StrategyType.valueOf(strategy);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    private com.algotrading.enums.InstrumentType parseInstrumentType(String value) {
+        if (value == null) return null;
+        try {
+            return com.algotrading.enums.InstrumentType.valueOf(value);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    private com.algotrading.enums.OptionType parseOptionType(String value) {
+        if (value == null) return null;
+        try {
+            return com.algotrading.enums.OptionType.valueOf(value);
         } catch (IllegalArgumentException e) {
             return null;
         }

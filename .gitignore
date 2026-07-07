@@ -1,1 +1,3 @@
 src/main/resources/service_account.json
+.env
+target/
