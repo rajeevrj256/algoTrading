@@ -56,7 +56,10 @@ app:
     enabled: true
     cron: "0 27 15 * * MON-FRI"   # shut app down at 3:27 PM IST after EOD
   kafka:
-    enabled: true                # set true only when a Kafka broker is available
+    enabled: true               # set true ONLY when a Kafka broker is running at spring.kafka.bootstrap-servers.
+                                 # When false, non-critical work (trade log, candle ingest, alerts) is saved
+                                 # directly (synchronous fallback) — no broker needed. Enabling this without a
+                                 # live broker makes every publish block then throw (backtests 500, log spam).
   datafeed:
     # yahoo | groww — Groww LTP/candles need their PAID data plan (free-plan keys
     # get 403 on all market-data endpoints even though token exchange succeeds).
@@ -79,7 +82,7 @@ backtest:
   lookback-days: 30               # default window when the endpoint omits ?days=
   groww:
     interval-minutes: 5           # candle granularity (match the live 5-min feed)
-    max-days-per-request: 25      # chunk size — stay under Groww's per-request range cap
+    max-days-per-request: 15      # chunk size — Groww caps 1-5 min candles at 15 days per request
 
 # ── Data Feed ─────────────────────────────────────────────────
 datafeed:

@@ -6,8 +6,10 @@ import com.algotrading.dto.DailySummaryDTO;
 import com.algotrading.dto.PositionDTO;
 import com.algotrading.service.CandleHistoryService;
 import com.algotrading.service.FnoCandleHistoryService;
+import com.algotrading.service.IndexCandleHistoryService;
 import com.algotrading.service.NotificationService;
 import com.algotrading.service.SheetsService;
+import com.algotrading.util.Symbols;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
@@ -33,6 +35,7 @@ public class TradingEventPublisher {
     private static final String TOPIC_REPORTING     = "algotrading.trade-reporting";
     private static final String TOPIC_NOTIFICATIONS = "algotrading.trade-notifications";
     private static final String TOPIC_CANDLES       = "algotrading.candle-ingest";
+    private static final String TOPIC_INDEX_CANDLES = "algotrading.index-candle-ingest";
     private static final String TOPIC_FNO_CANDLES   = "algotrading.fno-candle-ingest";
 
     @Value("${app.kafka.enabled:false}")
@@ -42,42 +45,46 @@ public class TradingEventPublisher {
     private final SheetsService sheetsService;
     private final NotificationService notificationService;
     private final CandleHistoryService candleHistoryService;
+    private final IndexCandleHistoryService indexCandleHistoryService;
     private final FnoCandleHistoryService fnoCandleHistoryService;
 
     // ── Candle ingest (→ CandleHistoryService / candle_history) ─
 
-    /** Persist freshly-fetched equity/index candles. Fire-and-forget; falls back to direct save. */
+    /**
+     * Persist freshly-fetched CASH candles. Routes by symbol type (live AND backtest):
+     * an INDEX symbol (NIFTY, BANKNIFTY, ...) → index_candle_history under the canonical
+     * name; anything else (equity) → candle_history. Uses Kafka when enabled AND the send
+     * succeeds; otherwise falls back to a **direct DB save** so candles are never lost.
+     */
     public void publishCandles(String symbol, List<CandleDTO> candles) {
         if (symbol == null || candles == null || candles.isEmpty()) return;
-        if (!shouldUseKafka()) {
-            candleHistoryService.saveAll(symbol, candles);
-            return;
+        String canonical = Symbols.canonicalIndex(symbol);
+        boolean isIndex = canonical != null;
+        String key = isIndex ? canonical : symbol;   // index stored under canonical name
+        String topic = isIndex ? TOPIC_INDEX_CANDLES : TOPIC_CANDLES;
+        if (shouldUseKafka()) {
+            CandleIngestEvent event = CandleIngestEvent.builder()
+                    .symbol(key).candles(candles).timestamp(LocalDateTime.now()).build();
+            if (trySend(topic, key, event)) return;
+            log.warn("[Kafka] candle send failed — saving {} bars for {} directly", candles.size(), key);
         }
-        CandleIngestEvent event = CandleIngestEvent.builder()
-                .symbol(symbol)
-                .candles(candles)
-                .timestamp(LocalDateTime.now())
-                .build();
-        send(TOPIC_CANDLES, symbol, event);
+        if (isIndex) indexCandleHistoryService.saveAll(key, candles);
+        else candleHistoryService.saveAll(key, candles);
     }
 
     /**
      * Persist freshly-fetched F&O (option premium) candles to fno_candle_history.
-     * Same async-via-Kafka rule as equity candles — live never blocks on the DB write;
-     * falls back to a direct save when Kafka is disabled.
+     * Same rule as equity candles: Kafka when it works, direct DB save otherwise.
      */
     public void publishFnoCandles(String symbol, List<CandleDTO> candles) {
         if (symbol == null || candles == null || candles.isEmpty()) return;
-        if (!shouldUseKafka()) {
-            fnoCandleHistoryService.saveAll(symbol, candles);
-            return;
+        if (shouldUseKafka()) {
+            CandleIngestEvent event = CandleIngestEvent.builder()
+                    .symbol(symbol).candles(candles).timestamp(LocalDateTime.now()).build();
+            if (trySend(TOPIC_FNO_CANDLES, symbol, event)) return;
+            log.warn("[Kafka] FNO candle send failed — saving {} bars for {} directly", candles.size(), symbol);
         }
-        CandleIngestEvent event = CandleIngestEvent.builder()
-                .symbol(symbol)
-                .candles(candles)
-                .timestamp(LocalDateTime.now())
-                .build();
-        send(TOPIC_FNO_CANDLES, symbol, event);
+        fnoCandleHistoryService.saveAll(symbol, candles);
     }
 
     // ── Reporting events (→ SheetsService / PostgreSQL) ──────
@@ -170,17 +177,33 @@ public class TradingEventPublisher {
 
     // ── Internal ─────────────────────────────────────────────
 
+    /** Fire-and-forget send (reporting/notifications) — drop on failure, never propagate. */
     private void send(String topic, String key, Object event) {
+        trySend(topic, key, event);
+    }
+
+    /**
+     * Attempt a Kafka send. Returns true if handed off to the producer, false if no template
+     * or the send threw synchronously (broker unreachable → metadata timeout). Callers that
+     * must not lose data (candle persistence) use the false return to fall back to a direct save.
+     */
+    private boolean trySend(String topic, String key, Object event) {
         KafkaTemplate<String, Object> kafkaTemplate = kafkaTemplateProvider.getIfAvailable();
         if (kafkaTemplate == null) {
-            log.warn("[Kafka] Kafka is enabled but no KafkaTemplate is available. Falling back is skipped for {}", topic);
-            return;
+            log.warn("[Kafka] enabled but no KafkaTemplate available for {}", topic);
+            return false;
         }
-        kafkaTemplate.send(topic, key, event)
-                .addCallback(
-                        result -> log.debug("[Kafka] Sent to {} key={}", topic, key),
-                        ex -> log.error("[Kafka] FAILED to send to {} key={}: {}", topic, key, ex.getMessage())
-                );
+        try {
+            kafkaTemplate.send(topic, key, event)
+                    .addCallback(
+                            result -> log.debug("[Kafka] Sent to {} key={}", topic, key),
+                            ex -> log.error("[Kafka] FAILED to send to {} key={}: {}", topic, key, ex.getMessage())
+                    );
+            return true;
+        } catch (Exception e) {
+            log.error("[Kafka] send to {} threw (broker down?): {}", topic, e.getMessage());
+            return false;
+        }
     }
 
     private boolean shouldUseKafka() {

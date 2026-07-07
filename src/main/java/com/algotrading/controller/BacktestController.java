@@ -63,7 +63,12 @@ public class BacktestController {
         if (symbolList.isEmpty()) {
             return ResponseEntity.ok(ApiResponse.error("No symbols provided"));
         }
+        log.info("[Backtest][EQUITY] ▶ request received — symbols={} strategy={} days={}",
+                symbolList, strategy == null ? "ALL" : strategy, days);
+        long t0 = System.currentTimeMillis();
         List<BacktestResultDTO> results = backtestService.runEquity(symbolList, strategy, days);
+        log.info("[Backtest][EQUITY] ■ done in {} ms — {} strategy result(s)",
+                System.currentTimeMillis() - t0, results.size());
         return ResponseEntity.ok(ApiResponse.ok(
                 String.format("Equity backtest complete — %d symbol(s), %dd, %d strategy result(s)",
                         symbolList.size(), days, results.size()),

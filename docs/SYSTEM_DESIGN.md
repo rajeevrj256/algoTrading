@@ -363,22 +363,26 @@ flowchart TD
 ```mermaid
 flowchart TD
   subgraph EQF["POST /api/backtest/equity"]
-    E1["GrowwHistoricalService.equityCandles - CASH, wide window"] --> E2["persist to candle_history"]
+    E1["GrowwHistoricalService.equityCandles - GET /v1/historical/candles CASH"] --> E2["persist to candle_history (equity) / index_candle_history (index)"]
     E2 --> E3["replay EQUITY-segment strategies - no look-ahead"]
     E3 --> E4["cash charges + slippage + EOD square-off"]
-    E4 --> E5["BacktestResultDTO per strategy"]
+    E4 --> E5["BacktestResultDTO per strategy + capture each trade"]
   end
 
   subgraph FNF["POST /api/backtest/fno"]
-    F1["underlying CASH candles - wide window"] --> F2["replay FNO-segment strategies"]
-    F2 --> F3["per signal: resolveContractAsOf - expiry+ATM+symbol"]
-    F3 --> F4["fetch REAL Groww FNO premium candles - entry day"]
+    F1["INDEX CASH candles -> index_candle_history"] --> F2["replay FNO-segment strategies ON THE INDEX"]
+    F2 --> F3["per signal: resolveContractAsOf -> groww_symbol NSE-NIFTY-..-CE"]
+    F3 --> F4["fetch REAL Groww FNO premium candles -> fno_candle_history"]
     F4 --> F5{"option data available?"}
     F5 -- no --> F6["skip - counted in skipped, no synthetic"]
     F5 -- yes --> F7["simulate: exit on underlying frame + premium hard-stop"]
     F7 --> F8["FNO charges on premium"]
-    F8 --> F9["BacktestResultDTO per strategy"]
+    F8 --> F9["BacktestResultDTO per strategy + capture each trade"]
   end
+
+  E5 --> P["BacktestPersistenceService (best-effort)"]
+  F9 --> P
+  P --> PDB[("backtest_run + backtest_result + backtest_{,fno_}trade_log")]
 ```
 
 ### 1A.8 Data model (ER) — separated equity vs F&O
@@ -428,13 +432,19 @@ erDiagram
   }
   candle_history {
     bigint id PK
-    string symbol "equity / index"
+    string symbol "equity"
+    timestamp ts
+    double close
+  }
+  index_candle_history {
+    bigint id PK
+    string symbol "canonical index"
     timestamp ts
     double close
   }
   fno_candle_history {
     bigint id PK
-    string symbol "option trading symbol"
+    string symbol "option groww_symbol"
     timestamp ts
     double close
   }
@@ -443,10 +453,40 @@ erDiagram
     string summary_date
     double total_pnl
   }
+  backtest_run {
+    bigint id PK
+    string mode "EQUITY | FNO"
+    string symbols
+    int window_days
+    double net_pnl
+  }
+  backtest_result {
+    bigint id PK
+    bigint run_id FK
+    string strategy
+    double avg_r
+  }
+  backtest_trade_log {
+    bigint id PK
+    bigint run_id FK
+    string symbol
+    string exit_reason
+    double pnl
+  }
+  backtest_fno_trade_log {
+    bigint id PK
+    bigint run_id FK
+    string symbol "option groww_symbol"
+    string exit_reason
+    double pnl
+  }
   open_position ||..|| trade_log : "same POS-n when closed"
   fno_open_position ||..|| fno_trade_log : "same POS-n when closed"
   strategy_config ||--o{ trade_log : "strategy runs -> equity trades"
   strategy_config ||--o{ fno_trade_log : "strategy runs -> F&O trades"
+  backtest_run ||--o{ backtest_result : "one run -> per-strategy results"
+  backtest_run ||--o{ backtest_trade_log : "one run -> equity trades"
+  backtest_run ||--o{ backtest_fno_trade_log : "one run -> F&O trades"
 ```
 
 ---
@@ -670,8 +710,9 @@ Tunables: `risk:` block in `application.yml` (source of truth).
 
 ## 9. Persistence model
 
-Flyway owns the schema (`db/migration/V1..V12`). **Never edit an applied migration —
-add a new `V13__*.sql`.** On Neon, Flyway runs over the DIRECT (non-pooler) endpoint
+Flyway owns the schema (`db/migration/V1..V16`). **Never edit an applied migration —
+add a new `V17__*.sql`.** Entity columns must match the SQL exactly or `ddl-auto: validate`
+fails at boot. On Neon, Flyway runs over the DIRECT (non-pooler) endpoint
 (`spring.flyway.url`) because session advisory locks break on PgBouncer.
 
 ### Tables
@@ -685,8 +726,13 @@ add a new `V13__*.sql`.** On Neon, Flyway runs over the DIRECT (non-pooler) endp
 | `daily_summary` | one row per trading day | `RiskService` / sheets |
 | `strategy_config` | per-strategy `enabled` + `segment` | strategy toggle API / migrations |
 | `intraday_symbol` | equity scan shortlist (refreshed every 30 min) | external updater API |
-| `candle_history` | stored 5-min **equity/index** OHLCV (unique on symbol+ts) | candle ingest + backtest fetch |
+| `candle_history` | stored 5-min **equity** CASH OHLCV (unique on symbol+ts) | candle ingest + backtest fetch |
+| `index_candle_history` | stored 5-min **index underlying** CASH OHLCV (unique on symbol+ts) | index candle ingest + backtest fetch |
 | `fno_candle_history` | stored 5-min **option premium** OHLCV (unique on symbol+ts) | F&O candle ingest + F&O backtest fetch |
+| `backtest_run` | one row per `/api/backtest/{equity,fno}` run (header + aggregate totals) | `BacktestPersistenceService` |
+| `backtest_result` | per-strategy summary of a run (= the JSON `data[]` rows) | `BacktestPersistenceService` |
+| `backtest_trade_log` | every simulated **equity** backtest trade | `BacktestPersistenceService` |
+| `backtest_fno_trade_log` | every simulated **F&O** backtest trade | `BacktestPersistenceService` |
 | `health_check_log` | health pings | health service |
 
 ### F&O table routing
@@ -720,22 +766,38 @@ never collide.
 `GrowwAuthServiceImpl` handles the daily token exchange (SHA256 checksum flow) and
 throttled authenticated GETs; it is shared by the feed **and** the option chain.
 
-### Candle persistence — always async via Kafka (both segments)
+**Historical candles use Groww's current `/v1/historical/candles` endpoint** —
+`groww_symbol` (dash-joined: `NSE-RELIANCE`, `NSE-NIFTY-08Jul25-24500-CE`),
+`candle_interval` (`5minute`), and `start_time`/`end_time` in **epoch seconds**. The
+deprecated `/v1/historical/candle/range` (`trading_symbol` + `interval_in_minutes` +
+epoch millis) is no longer used. groww_symbols are built by `Symbols.growwCashSymbol` /
+`Symbols.growwOptionSymbol`. LTP stays on `/v1/live-data/ltp` with underscore-joined
+`exchange_symbols` (`NSE_RELIANCE`).
+
+### Candle persistence — 3-way split, routed by symbol type (live AND backtest)
 
 Candle OHLCV is persisted through the **event publisher**, never a direct blocking DB
-write in the hot path (live never waits on the DB):
+write in the hot path. `TradingEventPublisher.publishCandles` **routes by symbol type** —
+so live-feed fetches and backtest-historical fetches land in the right store automatically,
+with no caller changes:
 
-| Candle type | Topic | Consumer | Table |
-|-------------|-------|----------|-------|
-| Equity / index (CASH) | `algotrading.candle-ingest` | `CandleIngestConsumer` → `CandleHistoryService` | `candle_history` |
+| Candle type | Topic | Consumer → service | Table |
+|-------------|-------|--------------------|-------|
+| **Equity** (CASH) | `algotrading.candle-ingest` | `CandleIngestConsumer` → `CandleHistoryService` | `candle_history` |
+| **Index underlying** (CASH) | `algotrading.index-candle-ingest` | `IndexCandleIngestConsumer` → `IndexCandleHistoryService` | `index_candle_history` |
 | **F&O option premium** | `algotrading.fno-candle-ingest` | `FnoCandleIngestConsumer` → `FnoCandleHistoryService` | `fno_candle_history` |
 
-`TradingEventPublisher.publishCandles` / `publishFnoCandles` send to Kafka when
-`app.kafka.enabled=true`, else fall back to a **direct save** — same rule for both
-segments. Live equity candles are captured on each fresh feed fetch; option candles are
-captured by the F&O **backtest** (`GrowwHistoricalService.optionCandles`, which also
-**reads through** `fno_candle_history` to avoid re-hitting Groww on re-runs). Live flow
-fetches option *LTP* only, not option candles.
+Routing: `Symbols.canonicalIndex(symbol) != null` → index store (keyed by canonical name
+`NIFTY`); an option `groww_symbol` (published via `publishFnoCandles`) → F&O store; else →
+equity store. So the three data sets are fully isolated and independently queryable.
+
+**Kafka default is OFF** → publishes are **direct DB saves**. When Kafka is ON, candle
+publishes still fall back to a **direct save if the send fails** (broker down) — candles
+are never silently lost (`trySend()` returns false → direct save). Reporting/notification
+sends are fire-and-forget (dropped on failure). Live equity/index candles are captured on
+each fresh feed fetch; option premium candles are captured by the F&O **backtest**
+(`GrowwHistoricalService.optionCandles`, which **reads through** `fno_candle_history` to
+avoid re-hitting Groww on re-runs). Live flow fetches option *LTP* only, not option candles.
 
 ---
 
@@ -746,26 +808,48 @@ each candle `i` sees only `candles[0..i]`, a signal on its close is simulated fo
 via candle high/low for stop/target, with the same breakeven+trailing as the live
 broker, EOD square-off, slippage on both fills, and real charges.
 
-Two **split modes**, each using its segment's strategies and the **Groww paid
-historical API** (`GrowwHistoricalService`, which persists every pull to
-`candle_history`):
+Endpoints are **`@PostMapping`** (a browser GET → 405, no logs). Two split modes, each
+using its segment's strategies and the **Groww paid historical API**
+(`GrowwHistoricalService`, `GET /v1/historical/candles`, chunked ≤15d):
 
-| Endpoint | Mode | Data | Charges |
-|----------|------|------|---------|
-| `POST /api/backtest/equity?symbols=RELIANCE,TCS&days=30` | EQUITY | Groww CASH candles | cash equity |
-| `POST /api/backtest/fno?symbols=NIFTY,BANKNIFTY&days=30` | FNO | **real Groww FNO option premium candles** | F&O (on premium) |
-| `POST /api/backtest/run?symbols=…&count=500` | generic underlying replay (legacy) | stored/live | cash |
+| Endpoint | Mode | Strategy runs on | Fill data | Charges |
+|----------|------|------------------|-----------|---------|
+| `POST /api/backtest/equity?symbols=RELIANCE,TCS&days=30` | EQUITY | equity CASH candles | same equity candles | cash equity |
+| `POST /api/backtest/fno?symbols=NIFTY,BANKNIFTY&days=30` | FNO | **index** CASH candles | **real Groww FNO option premium candles** | F&O (on premium) |
+| `POST /api/backtest/run?symbols=…&count=500` | generic underlying replay (legacy) | stored/live | — | cash |
 
-### F&O backtest specifics
+### F&O backtest specifics — strategy on the index, fill on the option
 
-- For each index signal, `resolveContractAsOf` builds the exact option the live flow
-  would have traded as-of that bar (expiry + ATM strike + trading symbol).
+- The strategy is **never run on the option series**. It runs on the **index** candles
+  (`INDEX_TREND.generate(NIFTY bars)`). The option is fill data, not signal data.
+- For each index signal, `resolveContractAsOf` builds the exact option the live flow would
+  have traded as-of that bar (expiry + ATM strike). `Symbols.growwOptionSymbol` maps it to
+  the Groww `groww_symbol` (`NSE-NIFTY-08Jul25-24500-CE`) for the historical fetch.
 - **Real Groww FNO premium candles** for that option (entry day only — F&O is intraday)
-  drive entry/exit fills. This was an explicit choice over synthetic Black-Scholes.
-- Signals with **no available option data** (e.g. expired-contract history missing) are
-  counted in `BacktestResultDTO.skipped` — no synthetic fallback; coverage is honest.
+  drive entry/exit fills. Explicit choice over synthetic Black-Scholes.
+- Signals with **no available option data** (expired-contract history missing) are counted
+  in `BacktestResultDTO.skipped` — no synthetic fallback; coverage is honest.
 - Exit is decided on the **underlying** frame (mirrors `checkOptionExit`); a premium
-  hard-stop guards theta.
+  hard-stop guards theta. So `fno_candle_history` is **signal-driven** — only the ATM
+  contract of a fired signal is fetched; no signal (e.g. `trades:0 skipped:0`) = no option
+  candles, by design.
+
+### Backtest persistence (V15) — runs are saved like live trades
+
+Every `/equity` and `/fno` run is persisted through `BacktestPersistenceService`
+(transactional, **best-effort — a persistence failure never fails the response**; the JSON
+is unchanged):
+
+- `backtest_run` — one header row (mode, symbols, strategy filter, days, aggregate totals).
+- `backtest_result` — one row per strategy (identical to the JSON `data[]`).
+- `backtest_trade_log` (equity) / `backtest_fno_trade_log` (F&O) — **one row per simulated
+  trade**: side, entry/exit time+price, stop/target (or option strike/expiry/lots/premium
+  stop), quantity, charges, gross+net pnl, R, and `exit_reason` — `TARGET`, `STOP_LOSS`,
+  `TRAIL_STOP`, `UNDERLYING_STOP`, `PREMIUM_STOP`, `EOD`, `RANGE_END`.
+
+Trades are captured by threading a collector list down the replay (the `BacktestServiceImpl`
+bean is a singleton — per-run state is passed, not fielded, so concurrent runs don't race).
+The fetched OHLC lands in the candle stores (§10). Inspect a run in SQL by `run_id`.
 
 Config: `backtest:` block (`lookback-days`, `groww.interval-minutes`,
 `groww.max-days-per-request` for chunked range pulls).
@@ -788,7 +872,7 @@ app:
 
 backtest:                # after-hours Groww-historical backtest window
   lookback-days: 30
-  groww: { interval-minutes: 5, max-days-per-request: 25 }
+  groww: { interval-minutes: 5, max-days-per-request: 15 }   # Groww caps 5-min candles at 15d/request
 
 risk: {...}              # confidence / R:R / caps / daily loss / cooldown
 charges: { ..., fno: {...} }   # equity + option charge models
@@ -832,13 +916,30 @@ not yaml.
 6. **Cross-table correctness** — shared `POS-n` sequence and the risk daily-loss +
    expectancy aggregation span both trade tables.
 7. **Separate F&O candle store, async persistence** — option premium candles go to
-   `fno_candle_history` (not `candle_history`); **both** equity and F&O candles persist
-   **async via Kafka** (`algotrading.candle-ingest` / `algotrading.fno-candle-ingest`)
+   `fno_candle_history` (not `candle_history`); candles persist **via Kafka when enabled**
    with a direct-save fallback, so live never blocks on the DB write. The F&O backtest
    reads through `fno_candle_history` to skip re-fetching Groww.
+8. **Groww historical API migration** — moved off the deprecated
+   `/v1/historical/candle/range` (`trading_symbol` + `interval_in_minutes` + epoch millis)
+   to the current **`/v1/historical/candles`** (`groww_symbol` + `candle_interval` + epoch
+   **seconds**), for both the live feed and the backtest. New `Symbols.growwCashSymbol` /
+   `growwOptionSymbol` builders; `max-days-per-request` 25 → **15** (Groww's 5-min cap).
+9. **Kafka default OFF + resilient publisher** — `app.kafka.enabled: false` by default
+   (direct save, no broker). `send()` no longer propagates (a broker-down send that threw
+   used to **500 the backtest**); candle publishes fall back to a **direct DB save** on
+   send failure so OHLC is never lost.
+10. **Backtest persistence** — every `/equity` and `/fno` run writes `backtest_run` +
+    `backtest_result` + per-trade `backtest_trade_log` / `backtest_fno_trade_log`
+    (`BacktestPersistenceService`, best-effort). Response JSON unchanged.
+11. **Third candle store — index isolated** — index underlying CASH candles now go to a
+    dedicated **`index_candle_history`** (not `candle_history`), routed by symbol type in
+    `publishCandles` for **both live and backtest**. Three isolated stores: equity /
+    index / option premium.
 
-Migrations: **`V12__parallel_engines_and_fno_tables.sql`** (items 3–6),
-**`V13__fno_candle_history.sql`** (item 7).
+Migrations: **`V12`** parallel engines + FNO tables (items 3–6), **`V13`**
+`fno_candle_history` (7), **`V14`** restore FNO segment defaults, **`V15`** backtest
+persistence (10), **`V16`** `index_candle_history` (11). Items 8–9 are code/config only.
+**Next migration = `V17`.**
 
 ---
 
@@ -938,14 +1039,20 @@ the **impact** on the running system.
   gate so peak rate doesn't rise when both are on. To go faster: batch LTP or move to a
   token bucket (see `docs/GROWW_API.md` §6) — at the cost of complexity/ban risk.
 
-### 14A.11 Kafka optional, with a synchronous fallback
+### 14A.11 Kafka optional (default OFF), with a resilient direct-save fallback
 
 - **Why:** decouple non-critical work (trade logging, candle ingest, alerts) from the hot
-  path when a broker is available, but never *require* Kafka to run.
+  path when a broker is available, but never *require* Kafka to run — a laptop/single-DB
+  setup should just work.
 - **Tradeoff:** two code paths to reason about; ordering/delivery differs between modes.
-- **Impact:** `TradingEventPublisher` publishes to Kafka when `app.kafka.enabled=true`, else
-  calls the service directly. The critical path (feed→strategy→risk→broker) is always
-  synchronous regardless.
+- **Impact:** `app.kafka.enabled` defaults **false** → `TradingEventPublisher` calls the
+  services directly. When ON, candle publishes try Kafka and **fall back to a direct DB
+  save if the send fails** (broker unreachable) so OHLC is never lost;
+  reporting/notification sends are fire-and-forget (dropped on failure). Neither can throw
+  into the caller — a broker-down send previously propagated and **500'd the backtest**.
+  The critical path (feed→strategy→risk→broker) is always synchronous regardless.
+  Gotcha: enabling Kafka without a live broker makes each publish stall ~`max.block.ms`
+  (metadata timeout) before falling back — leave it OFF unless a broker is running.
 
 ### 14A.12 Yahoo as default feed, Groww as opt-in paid feed
 
@@ -982,6 +1089,45 @@ the **impact** on the running system.
   then re-inserts; `loadOpenPositions` merges both on restart. Closed trades (the real audit
   trail) are append-only in the `*_trade_log` tables.
 
+### 14A.16 Groww current historical API (`/v1/historical/candles`), epoch seconds
+
+- **Why:** the code targeted Groww's **deprecated** `/v1/historical/candle/range` shape
+  (`trading_symbol` + `interval_in_minutes` + epoch millis). The current documented API is
+  `/v1/historical/candles` (`groww_symbol` + `candle_interval` + `start_time`/`end_time`).
+- **Tradeoff:** `groww_symbol` is a dash-joined, **case-sensitive** id
+  (`NSE-NIFTY-08Jul25-24500-CE`) — a wrong case/format silently yields empty candles (all
+  `skipped`). Chose **epoch seconds** over the `yyyy-MM-dd HH:mm:ss` form to keep the URL
+  digits-only (a space would be double-encoded by RestTemplate).
+- **Impact:** both the live feed and the backtest use the current endpoint;
+  `Symbols.growwCashSymbol`/`growwOptionSymbol` centralize the id format (locked by
+  `SymbolsTest`). `max-days-per-request` dropped 25 → **15** (Groww caps 5-min candles at
+  15 days/request). LTP was already correct (`/v1/live-data/ltp`, `NSE_RELIANCE`) — untouched.
+
+### 14A.17 Three isolated candle stores, routed by symbol type
+
+- **Why:** the user wanted index underlying OHLC separated from equity; option premium was
+  already separate. Keeping equity / index / option in one table mixed unrelated data.
+- **Tradeoff:** three tables + three consumers/services instead of one; `candle_history` no
+  longer holds index bars (the legacy `/run` backtest reading index from it falls back to
+  the live feed).
+- **Impact:** `publishCandles` routes by `Symbols.canonicalIndex` (index → `index_candle_history`
+  under the canonical name) vs `publishFnoCandles` (option → `fno_candle_history`) vs equity
+  (`candle_history`). One routing point covers **live and backtest**; each store is cleanly
+  queryable on its own.
+
+### 14A.18 Backtest runs persisted like live trades (best-effort)
+
+- **Why:** a backtest should be inspectable in SQL the same way live trades are — not just a
+  transient JSON summary. Store the run, the per-strategy result, and **every simulated trade**.
+- **Tradeoff:** rows accumulate per run (intended history, not deduped); trade capture threads
+  a collector list through the replay (the service bean is a singleton — per-run state is
+  **passed, not fielded**, so concurrent runs don't race).
+- **Impact:** `BacktestPersistenceService` writes `backtest_run` / `backtest_result` /
+  `backtest_{,fno_}trade_log` in one transaction, wrapped so a DB failure **never fails the
+  backtest response**. `profitFactor` +Infinity is sanitized to 0 for the DOUBLE column.
+  Each trade carries an `exit_reason` (TARGET / STOP_LOSS / TRAIL_STOP / UNDERLYING_STOP /
+  PREMIUM_STOP / EOD / RANGE_END).
+
 ---
 
 ## 14B. Scaling & concurrency options — Redis, Kafka, parallel Groww (why + impact)
@@ -1011,11 +1157,14 @@ but optional. Each below: **current state**, **why adopt**, **tradeoff**, **impa
 
 ### 14B.2 Kafka — async event backbone (wired, optional)
 
-- **Current state:** `app.kafka.enabled` gates it. ON → non-critical work (trade logging,
-  **equity candle ingest, F&O candle ingest**, Telegram alerts) is **published** to topics
-  and consumed asynchronously. OFF → `TradingEventPublisher` calls the services **directly**
-  (synchronous fallback). The critical path (feed→strategy→risk→broker) is **always
-  synchronous** either way. Candle persistence (both `candle_history` and
+- **Current state:** `app.kafka.enabled` gates it (**default OFF** — no broker needed to
+  run). ON → non-critical work (trade logging, **equity candle ingest, F&O candle ingest**,
+  Telegram alerts) is **published** to topics and consumed asynchronously. OFF →
+  `TradingEventPublisher` calls the services **directly** (synchronous fallback). The
+  critical path (feed→strategy→risk→broker) is **always synchronous** either way. Turning
+  it ON without a live broker makes publishes block-then-throw — `send()` now catches that,
+  but the fix is to run a broker or leave it OFF. The `@ConditionalOnProperty` guard means
+  the consumers + `KafkaConfig` don't even load when OFF. Candle persistence (both `candle_history` and
   `fno_candle_history`) always goes through this path so live never blocks on the DB write.
 - **Why adopt (turn ON):** decouple slow/non-critical I/O (DB writes, Telegram, candle
   persistence) from the scan loop so a slow sink never stalls trading; buffer bursts;

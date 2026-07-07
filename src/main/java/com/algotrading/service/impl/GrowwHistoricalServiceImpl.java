@@ -58,19 +58,23 @@ public class GrowwHistoricalServiceImpl implements GrowwHistoricalService {
 
     @Override
     public List<CandleDTO> equityCandles(String symbol, int lookbackDays) {
-        String tradingSymbol = growwCashSymbol(symbol);
+        String label = cashLabel(symbol);              // storage / CandleDTO key: NIFTY, RELIANCE
+        String growwSymbol = Symbols.growwCashSymbol(symbol);   // Groww groww_symbol: NSE-NIFTY, NSE-RELIANCE
         LocalDate to = LocalDate.now(IST);
         LocalDate from = to.minusDays(Math.max(1, lookbackDays));
-        List<CandleDTO> candles = fetchRange("CASH", tradingSymbol, from, to);
+        log.info("[GrowwHist] equityCandles {} → groww_symbol={} window {}..{} (creds={})",
+                label, growwSymbol, from, to, authService.hasCredentials());
+        List<CandleDTO> candles = fetchRange("CASH", label, growwSymbol, from, to);
         // Persist async via Kafka (direct save when Kafka off) → candle_history.
-        eventPublisher.publishCandles(tradingSymbol, candles);
+        eventPublisher.publishCandles(label, candles);
         return candles;
     }
 
     @Override
-    public List<CandleDTO> optionCandles(String optionTradingSymbol, LocalDate from, LocalDate to) {
-        if (optionTradingSymbol == null || optionTradingSymbol.trim().isEmpty()) return new ArrayList<CandleDTO>();
-        String sym = optionTradingSymbol.trim().toUpperCase();
+    public List<CandleDTO> optionCandles(String growwOptionSymbol, LocalDate from, LocalDate to) {
+        if (growwOptionSymbol == null || growwOptionSymbol.trim().isEmpty()) return new ArrayList<CandleDTO>();
+        // Groww groww_symbol is case-sensitive (e.g. NSE-NIFTY-08Jul25-24500-CE) — do NOT upper-case.
+        String sym = growwOptionSymbol.trim();
 
         // Read-through: reuse stored F&O candles for this range instead of re-hitting Groww.
         List<CandleDTO> cached = fnoCandleHistoryService.loadRange(sym,
@@ -80,7 +84,7 @@ public class GrowwHistoricalServiceImpl implements GrowwHistoricalService {
             return cached;
         }
 
-        List<CandleDTO> candles = fetchRange("FNO", sym, from, to);
+        List<CandleDTO> candles = fetchRange("FNO", sym, sym, from, to);
         // Persist async via Kafka (direct save when Kafka off) → fno_candle_history.
         eventPublisher.publishFnoCandles(sym, candles);
         return candles;
@@ -88,11 +92,15 @@ public class GrowwHistoricalServiceImpl implements GrowwHistoricalService {
 
     // ── Groww fetch ───────────────────────────────────────────
 
-    /** Chunked historical pull over [from, to], stitched in time order. */
-    private List<CandleDTO> fetchRange(String segment, String tradingSymbol, LocalDate from, LocalDate to) {
+    /**
+     * Chunked historical pull over [from, to], stitched in time order.
+     * {@code label} keys the returned CandleDTOs (and persistence); {@code growwSymbol}
+     * is Groww's groww_symbol (NSE-RELIANCE / NSE-NIFTY-08Jul25-24500-CE) used on the wire.
+     */
+    private List<CandleDTO> fetchRange(String segment, String label, String growwSymbol, LocalDate from, LocalDate to) {
         List<CandleDTO> all = new ArrayList<CandleDTO>();
         if (!authService.hasCredentials()) {
-            log.warn("[GrowwHist] no Groww credentials — cannot fetch {} {}", segment, tradingSymbol);
+            log.warn("[GrowwHist] no Groww credentials — cannot fetch {} {}", segment, growwSymbol);
             return all;
         }
         int chunk = Math.max(1, maxDaysPerRequest);
@@ -100,38 +108,60 @@ public class GrowwHistoricalServiceImpl implements GrowwHistoricalService {
         while (!cursor.isAfter(to)) {
             LocalDate chunkEnd = cursor.plusDays(chunk - 1);
             if (chunkEnd.isAfter(to)) chunkEnd = to;
-            all.addAll(fetchChunk(segment, tradingSymbol, cursor, chunkEnd));
+            all.addAll(fetchChunk(segment, label, growwSymbol, cursor, chunkEnd));
             cursor = chunkEnd.plusDays(1);
         }
         return all;
     }
 
-    private List<CandleDTO> fetchChunk(String segment, String tradingSymbol, LocalDate from, LocalDate to) {
+    private List<CandleDTO> fetchChunk(String segment, String label, String growwSymbol, LocalDate from, LocalDate to) {
         try {
-            long startMillis = from.atStartOfDay(IST).toInstant().toEpochMilli();
-            long endMillis = to.atTime(LocalTime.of(23, 59, 59)).atZone(IST).toInstant().toEpochMilli();
+            // Groww /v1/historical/candles accepts epoch SECONDS (or "yyyy-MM-dd HH:mm:ss").
+            // Seconds are digits-only → no space to double-encode through RestTemplate.
+            long startSec = from.atStartOfDay(IST).toInstant().getEpochSecond();
+            long endSec = to.atTime(LocalTime.of(23, 59, 59)).atZone(IST).toInstant().getEpochSecond();
 
-            String url = UriComponentsBuilder.fromHttpUrl(baseUrl + "/v1/historical/candle/range")
+            String url = UriComponentsBuilder.fromHttpUrl(baseUrl + "/v1/historical/candles")
                     .queryParam("exchange", EXCHANGE)
                     .queryParam("segment", segment)
-                    .queryParam("trading_symbol", tradingSymbol)
-                    .queryParam("start_time", startMillis)
-                    .queryParam("end_time", endMillis)
-                    .queryParam("interval_in_minutes", intervalMinutes)
+                    .queryParam("groww_symbol", growwSymbol)
+                    .queryParam("start_time", startSec)
+                    .queryParam("end_time", endSec)
+                    .queryParam("candle_interval", candleInterval())
                     .toUriString();
 
+            log.info("[GrowwHist] → GET /v1/historical/candles {} {} {}..{} ({})",
+                    segment, growwSymbol, from, to, candleInterval());
             ResponseEntity<String> resp = authService.get(url);
-            return parseCandles(tradingSymbol, resp.getBody());
+            List<CandleDTO> parsed = parseCandles(label, resp.getBody());
+            log.info("[GrowwHist] ← {} {} — {} candle(s) [{}]", segment, growwSymbol, parsed.size(),
+                    resp.getStatusCodeValue());
+            return parsed;
         } catch (org.springframework.web.client.HttpClientErrorException.NotFound e) {
-            log.debug("[GrowwHist] {} {} — no data (404) for {}..{}", segment, tradingSymbol, from, to);
+            log.debug("[GrowwHist] {} {} — no data (404) for {}..{}", segment, growwSymbol, from, to);
             return new ArrayList<CandleDTO>();
         } catch (org.springframework.web.client.HttpClientErrorException.Forbidden e) {
             log.warn("[GrowwHist] {} {} — FORBIDDEN (403). Historical data scope missing on this plan.",
-                    segment, tradingSymbol);
+                    segment, growwSymbol);
             return new ArrayList<CandleDTO>();
         } catch (Exception e) {
-            log.warn("[GrowwHist] {} {} fetch failed ({}..{}): {}", segment, tradingSymbol, from, to, e.getMessage());
+            log.warn("[GrowwHist] {} {} fetch failed ({}..{}): {}", segment, growwSymbol, from, to, e.getMessage());
             return new ArrayList<CandleDTO>();
+        }
+    }
+
+    /** Groww candle_interval token for the configured minute granularity. */
+    private String candleInterval() {
+        switch (intervalMinutes) {
+            case 1:    return "1minute";
+            case 5:    return "5minute";
+            case 10:   return "10minute";
+            case 15:   return "15minute";
+            case 30:   return "30minute";
+            case 60:   return "1hour";
+            case 240:  return "4hours";
+            case 1440: return "1day";
+            default:   return intervalMinutes + "minute";
         }
     }
 
@@ -177,8 +207,8 @@ public class GrowwHistoricalServiceImpl implements GrowwHistoricalService {
         }
     }
 
-    /** Cash trading symbol: canonical index name (NIFTY_50 → NIFTY) or the plain equity symbol. */
-    private String growwCashSymbol(String symbol) {
+    /** Storage/label key: canonical index name (NIFTY_50 → NIFTY) or the plain equity symbol. */
+    private String cashLabel(String symbol) {
         String canonical = Symbols.canonicalIndex(symbol);
         return canonical != null ? canonical : symbol.trim().toUpperCase();
     }

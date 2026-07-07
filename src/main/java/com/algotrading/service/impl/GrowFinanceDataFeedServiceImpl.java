@@ -134,16 +134,17 @@ public class GrowFinanceDataFeedServiceImpl implements DataFeedService {
 
     private List<CandleDTO> fetchCandles(String symbol) {
         try {
-            long endEpochMillis = Instant.now().toEpochMilli();
-            long startEpochMillis = endEpochMillis - (LOOKBACK_DAYS * 24L * 60 * 60 * 1000);
+            // Groww /v1/historical/candles accepts epoch SECONDS (or "yyyy-MM-dd HH:mm:ss").
+            long endEpochSec = Instant.now().getEpochSecond();
+            long startEpochSec = endEpochSec - (LOOKBACK_DAYS * 24L * 60 * 60);
 
-            String url = UriComponentsBuilder.fromHttpUrl(baseUrl + "/v1/historical/candle/range")
+            String url = UriComponentsBuilder.fromHttpUrl(baseUrl + "/v1/historical/candles")
                     .queryParam("exchange", EXCHANGE)
                     .queryParam("segment", SEGMENT)
-                    .queryParam("trading_symbol", growwTradingSymbol(symbol))
-                    .queryParam("start_time", startEpochMillis)
-                    .queryParam("end_time", endEpochMillis)
-                    .queryParam("interval_in_minutes", CANDLE_INTERVAL_MIN)
+                    .queryParam("groww_symbol", growwHistoricalSymbol(symbol))
+                    .queryParam("start_time", startEpochSec)
+                    .queryParam("end_time", endEpochSec)
+                    .queryParam("candle_interval", CANDLE_INTERVAL_MIN + "minute")
                     .toUriString();
 
             ResponseEntity<String> resp = authService.get(url);

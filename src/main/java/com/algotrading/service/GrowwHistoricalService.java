@@ -23,9 +23,9 @@ public interface GrowwHistoricalService {
     List<CandleDTO> equityCandles(String symbol, int lookbackDays);
 
     /**
-     * FNO-segment premium candles for a resolved option trading symbol
-     * (e.g. NIFTY2570824500CE) over an explicit [from, to] date window (inclusive).
+     * FNO-segment premium candles for a Groww option groww_symbol
+     * (e.g. NSE-NIFTY-08Jul25-24500-CE) over an explicit [from, to] date window (inclusive).
      * Empty when Groww has no data for that (usually expired) contract.
      */
-    List<CandleDTO> optionCandles(String optionTradingSymbol, LocalDate from, LocalDate to);
+    List<CandleDTO> optionCandles(String growwOptionSymbol, LocalDate from, LocalDate to);
 }

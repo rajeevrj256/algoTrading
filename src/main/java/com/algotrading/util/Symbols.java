@@ -2,10 +2,13 @@ package com.algotrading.util;
 
 import lombok.experimental.UtilityClass;
 
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -17,10 +20,32 @@ public class Symbols {
 
     private static final Map<String, String> INDEX_ALIASES = buildAliases();
 
+    /** Groww groww_symbol expiry token, e.g. 08Jul25 (case-sensitive on Groww). */
+    private static final DateTimeFormatter GROWW_EXPIRY = DateTimeFormatter.ofPattern("ddMMMyy", Locale.ENGLISH);
+
     /** Canonical index name, or null when the symbol is not a known index. */
     public static String canonicalIndex(String symbol) {
         if (symbol == null) return null;
         return INDEX_ALIASES.get(normalize(symbol));
+    }
+
+    /**
+     * Groww groww_symbol for a CASH instrument (equity or index):
+     * "RELIANCE" → "NSE-RELIANCE", "NIFTY_50" → "NSE-NIFTY".
+     * (Groww's current /v1/historical/candles keys instruments by groww_symbol.)
+     */
+    public static String growwCashSymbol(String symbol) {
+        String canonical = canonicalIndex(symbol);
+        String base = canonical != null ? canonical : normalize(symbol).replace('_', '-');
+        return "NSE-" + base;
+    }
+
+    /**
+     * Groww groww_symbol for an index option, e.g.
+     * ("NIFTY", 2025-07-08, 24500, "CE") → "NSE-NIFTY-08Jul25-24500-CE".
+     */
+    public static String growwOptionSymbol(String underlying, LocalDate expiry, double strike, String optionType) {
+        return "NSE-" + underlying + "-" + GROWW_EXPIRY.format(expiry) + "-" + (long) strike + "-" + optionType;
     }
 
     public static boolean isIndex(String symbol) {

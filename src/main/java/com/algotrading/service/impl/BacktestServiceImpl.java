@@ -9,8 +9,11 @@ import com.algotrading.enums.OptionType;
 import com.algotrading.enums.Segment;
 import com.algotrading.enums.SignalType;
 import com.algotrading.enums.StrategyType;
+import com.algotrading.entity.BacktestFnoTradeLogEntity;
+import com.algotrading.entity.BacktestTradeLogEntity;
 import com.algotrading.model.OptionContract;
 import com.algotrading.model.TradeCharges;
+import com.algotrading.service.BacktestPersistenceService;
 import com.algotrading.service.BacktestService;
 import com.algotrading.service.CandleHistoryService;
 import com.algotrading.service.ChargesService;
@@ -74,6 +77,7 @@ public class BacktestServiceImpl implements BacktestService {
     private final OptionChainService optionChainService;
     private final StrategyService strategyService;
     private final FnoProperties fnoProperties;
+    private final BacktestPersistenceService persistenceService;
 
     @Value("${broker.slippage-pct:0.02}")
     private double slippagePct;
@@ -100,7 +104,7 @@ public class BacktestServiceImpl implements BacktestService {
                 log.warn("[Backtest] {} — not enough candles ({})", symbol, candles == null ? 0 : candles.size());
                 continue;
             }
-            replayEquityAllStrategies(symbol, type, null, candles, aggs);
+            replayEquityAllStrategies(symbol, type, null, candles, aggs, null);
         }
         return toResults(aggs, "EQUITY");
     }
@@ -109,6 +113,7 @@ public class BacktestServiceImpl implements BacktestService {
     public List<BacktestResultDTO> runEquity(List<String> symbols, StrategyType type, int lookbackDays) {
         Map<StrategyType, Agg> aggs = new LinkedHashMap<StrategyType, Agg>();
         Set<StrategyType> segmentSet = type != null ? null : strategyService.strategiesForSegment(Segment.EQUITY);
+        List<BacktestTradeLogEntity> trades = new ArrayList<BacktestTradeLogEntity>();
         for (String rawSymbol : symbols) {
             String symbol = rawSymbol.trim().toUpperCase();
             if (symbol.isEmpty()) continue;
@@ -119,20 +124,26 @@ public class BacktestServiceImpl implements BacktestService {
                 continue;
             }
             log.info("[Backtest][EQUITY] {} — {} candles over {}d", symbol, candles.size(), lookbackDays);
-            replayEquityAllStrategies(symbol, type, segmentSet, candles, aggs);
+            replayEquityAllStrategies(symbol, type, segmentSet, candles, aggs, trades);
         }
-        return toResults(aggs, "EQUITY");
+        List<BacktestResultDTO> results = toResults(aggs, "EQUITY");
+        // Persist run header + per-strategy results + every simulated trade (best-effort).
+        persistenceService.save("EQUITY", String.join(",", symbols), type, lookbackDays, results, trades, null);
+        return results;
     }
 
     private void replayEquityAllStrategies(String symbol, StrategyType type, Set<StrategyType> segmentSet,
-                                           List<CandleDTO> candles, Map<StrategyType, Agg> aggs) {
+                                           List<CandleDTO> candles, Map<StrategyType, Agg> aggs,
+                                           List<BacktestTradeLogEntity> sink) {
         for (TradingStrategy strat : strategies) {
             if (type != null && strat.getType() != type) continue;
             if (segmentSet != null && !segmentSet.contains(strat.getType())) continue;
             Agg agg = aggs.computeIfAbsent(strat.getType(), k -> new Agg());
             int before = agg.trades;
-            replayEquity(symbol, strat, candles, agg);
-            if (agg.trades > before) agg.symbols.add(symbol);
+            replayEquity(symbol, strat, candles, agg, sink);
+            int found = agg.trades - before;
+            log.info("[Backtest][EQUITY] {} · {} → {} trade(s)", symbol, strat.getType(), found);
+            if (found > 0) agg.symbols.add(symbol);
         }
     }
 
@@ -158,7 +169,8 @@ public class BacktestServiceImpl implements BacktestService {
         }
     }
 
-    private void replayEquity(String symbol, TradingStrategy strat, List<CandleDTO> candles, Agg agg) {
+    private void replayEquity(String symbol, TradingStrategy strat, List<CandleDTO> candles, Agg agg,
+                              List<BacktestTradeLogEntity> sink) {
         int n = candles.size();
         int i = Math.max(strat.minCandles(), 2);
         while (i < n - 1) {
@@ -172,13 +184,15 @@ public class BacktestServiceImpl implements BacktestService {
                 i++;
                 continue;
             }
-            int exitIndex = simulateEquityTrade(signal, candles, i, agg);
+            int exitIndex = simulateEquityTrade(symbol, strat.getType(), signal, candles, i, agg, sink);
             i = Math.max(exitIndex + 1, i + 1);
         }
     }
 
     /** Returns the candle index at which the trade exited. */
-    private int simulateEquityTrade(TradeSignalDTO signal, List<CandleDTO> candles, int entryIdx, Agg agg) {
+    private int simulateEquityTrade(String symbol, StrategyType strategy, TradeSignalDTO signal,
+                                    List<CandleDTO> candles, int entryIdx, Agg agg,
+                                    List<BacktestTradeLogEntity> sink) {
         boolean isLong = signal.getSignal() == SignalType.BUY;
         int qty = signal.getQuantity();
 
@@ -195,12 +209,14 @@ public class BacktestServiceImpl implements BacktestService {
 
         double exitPrice = candles.get(candles.size() - 1).getClose();
         int exitIdx = candles.size() - 1;
+        String exitReason = "RANGE_END";
 
         for (int j = entryIdx + 1; j < candles.size(); j++) {
             CandleDTO c = candles.get(j);
             if (entryDay != null && !entryDay.equals(dayOf(c))) {
                 exitPrice = candles.get(j - 1).getClose();
                 exitIdx = j - 1;
+                exitReason = "EOD";
                 break;
             }
             peak = isLong ? Math.max(peak, c.getHigh()) : Math.min(peak, c.getLow());
@@ -208,8 +224,8 @@ public class BacktestServiceImpl implements BacktestService {
 
             boolean stopHit   = isLong ? c.getLow()  <= stop   : c.getHigh() >= stop;
             boolean targetHit = isLong ? c.getHigh() >= target : c.getLow()  <= target;
-            if (stopHit)   { exitPrice = stop;   exitIdx = j; break; }
-            if (targetHit) { exitPrice = target; exitIdx = j; break; }
+            if (stopHit)   { exitPrice = stop;   exitIdx = j; exitReason = stop != initialStop ? "TRAIL_STOP" : "STOP_LOSS"; break; }
+            if (targetHit) { exitPrice = target; exitIdx = j; exitReason = "TARGET"; break; }
         }
 
         double exitSlip = exitPrice * slippagePct / 100.0;
@@ -218,6 +234,30 @@ public class BacktestServiceImpl implements BacktestService {
         TradeCharges ch = chargesService.calculate(signal.getSignal(), entry, filledExit, qty);
         double rMultiple = (r * qty) > 0 ? ch.getNetPnl() / (r * qty) : 0;
         agg.add(ch.getGrossPnl(), ch.getTotalCharges(), ch.getNetPnl(), rMultiple);
+
+        if (sink != null) {
+            double invested = entry * qty;
+            double pnlPct = invested > 0 ? ch.getNetPnl() / invested * 100.0 : 0;
+            sink.add(BacktestTradeLogEntity.builder()
+                    .strategy(strategy.name())
+                    .symbol(symbol)
+                    .side(signal.getSignal().name())
+                    .entryTime(candles.get(entryIdx).getTimestamp())
+                    .entryPrice(round2(entry))
+                    .exitTime(candles.get(exitIdx).getTimestamp())
+                    .exitPrice(round2(filledExit))
+                    .stopLoss(round2(initialStop))
+                    .target(round2(target))
+                    .quantity(qty)
+                    .riskAmount(round2(r * qty))
+                    .charges(round2(ch.getTotalCharges()))
+                    .grossPnl(round2(ch.getGrossPnl()))
+                    .pnl(round2(ch.getNetPnl()))
+                    .pnlPct(round2(pnlPct))
+                    .riskReward(Math.round(rMultiple * 1000.0) / 1000.0)
+                    .exitReason(exitReason)
+                    .build());
+        }
         return exitIdx;
     }
 
@@ -227,6 +267,7 @@ public class BacktestServiceImpl implements BacktestService {
     public List<BacktestResultDTO> runFno(List<String> symbols, StrategyType type, int lookbackDays) {
         Map<StrategyType, Agg> aggs = new LinkedHashMap<StrategyType, Agg>();
         Set<StrategyType> segmentSet = type != null ? null : strategyService.strategiesForSegment(Segment.FNO);
+        List<BacktestFnoTradeLogEntity> trades = new ArrayList<BacktestFnoTradeLogEntity>();
         for (String rawSymbol : symbols) {
             String symbol = rawSymbol.trim().toUpperCase();
             if (symbol.isEmpty()) continue;
@@ -251,14 +292,20 @@ public class BacktestServiceImpl implements BacktestService {
                 if (segmentSet != null && !segmentSet.contains(strat.getType())) continue;
                 Agg agg = aggs.computeIfAbsent(strat.getType(), k -> new Agg());
                 int before = agg.trades;
-                replayFno(symbol, strat, underlying, agg);
-                if (agg.trades > before) agg.symbols.add(canonical);
+                replayFno(symbol, strat, underlying, agg, trades);
+                int found = agg.trades - before;
+                log.info("[Backtest][FNO] {} · {} → {} trade(s)", canonical, strat.getType(), found);
+                if (found > 0) agg.symbols.add(canonical);
             }
         }
-        return toResults(aggs, "FNO");
+        List<BacktestResultDTO> results = toResults(aggs, "FNO");
+        // Persist run header + per-strategy results + every simulated option trade (best-effort).
+        persistenceService.save("FNO", String.join(",", symbols), type, lookbackDays, results, null, trades);
+        return results;
     }
 
-    private void replayFno(String scanSymbol, TradingStrategy strat, List<CandleDTO> candles, Agg agg) {
+    private void replayFno(String scanSymbol, TradingStrategy strat, List<CandleDTO> candles, Agg agg,
+                           List<BacktestFnoTradeLogEntity> sink) {
         int n = candles.size();
         int i = Math.max(strat.minCandles(), 2);
         while (i < n - 1) {
@@ -272,7 +319,7 @@ public class BacktestServiceImpl implements BacktestService {
                 i++;
                 continue;
             }
-            int exitIndex = simulateOptionTrade(scanSymbol, signal, candles, i, agg);
+            int exitIndex = simulateOptionTrade(scanSymbol, strat.getType(), signal, candles, i, agg, sink);
             i = Math.max(exitIndex + 1, i + 1);
         }
     }
@@ -283,8 +330,9 @@ public class BacktestServiceImpl implements BacktestService {
      * the real option premium at the exit bar, and a premium hard-stop guards theta/IV
      * bleed. Returns the underlying candle index at which the trade exited.
      */
-    private int simulateOptionTrade(String scanSymbol, TradeSignalDTO signal,
-                                    List<CandleDTO> candles, int entryIdx, Agg agg) {
+    private int simulateOptionTrade(String scanSymbol, StrategyType strategy, TradeSignalDTO signal,
+                                    List<CandleDTO> candles, int entryIdx, Agg agg,
+                                    List<BacktestFnoTradeLogEntity> sink) {
         CandleDTO entryCandle = candles.get(entryIdx);
         LocalDateTime entryTs = entryCandle.getTimestamp();
         if (entryTs == null) { agg.skip(); return entryIdx; }
@@ -296,7 +344,11 @@ public class BacktestServiceImpl implements BacktestService {
 
         // Paper F&O squares off intraday → entry and exit are same-day; option data = entry day.
         LocalDate day = entryTs.toLocalDate();
-        List<CandleDTO> optCandles = growwHistoricalService.optionCandles(contract.getTradingSymbol(), day, day);
+        // Groww historical keys options by groww_symbol (NSE-NIFTY-08Jul25-24500-CE), not the
+        // compact NSE trading symbol used for LTP/position tracking.
+        String growwOptSymbol = Symbols.growwOptionSymbol(contract.getUnderlying(), contract.getExpiry(),
+                contract.getStrike(), contract.getOptionType().name());
+        List<CandleDTO> optCandles = growwHistoricalService.optionCandles(growwOptSymbol, day, day);
         if (optCandles == null || optCandles.isEmpty()) { agg.skip(); return entryIdx; }
 
         Map<LocalDateTime, CandleDTO> optByTs = new HashMap<LocalDateTime, CandleDTO>();
@@ -338,6 +390,7 @@ public class BacktestServiceImpl implements BacktestService {
         double lastPrem = entryOpt.getClose();
         double exitPrem = lastPrem;
         int exitIdx = entryIdx;
+        String exitReason = "RANGE_END";
 
         for (int j = entryIdx + 1; j < candles.size(); j++) {
             CandleDTO c = candles.get(j);
@@ -346,6 +399,7 @@ public class BacktestServiceImpl implements BacktestService {
             if (!day.equals(dayOf(c))) {
                 exitIdx = j - 1;
                 exitPrem = premiumClose(optByTs, candles.get(j - 1).getTimestamp(), lastPrem);
+                exitReason = "EOD";
                 break;
             }
 
@@ -361,9 +415,9 @@ public class BacktestServiceImpl implements BacktestService {
             boolean uStopHit  = longFrame ? c.getLow()  <= uStop   : c.getHigh() >= uStop;
             boolean premStopHit = opt != null && barPremLow <= premiumStop;
 
-            if (targetHit)      { exitPrem = barPrem;     exitIdx = j; break; }
-            else if (uStopHit)  { exitPrem = barPrem;     exitIdx = j; break; }
-            else if (premStopHit) { exitPrem = premiumStop; exitIdx = j; break; }
+            if (targetHit)      { exitPrem = barPrem;     exitIdx = j; exitReason = "TARGET"; break; }
+            else if (uStopHit)  { exitPrem = barPrem;     exitIdx = j; exitReason = uStop != uInitStop ? "TRAIL_STOP" : "UNDERLYING_STOP"; break; }
+            else if (premStopHit) { exitPrem = premiumStop; exitIdx = j; exitReason = "PREMIUM_STOP"; break; }
 
             exitPrem = barPrem;   // carry: if we run out of same-day bars, exit here
             exitIdx = j;
@@ -376,6 +430,31 @@ public class BacktestServiceImpl implements BacktestService {
         double premRisk = entryFill - premiumStop;
         double rMultiple = (premRisk * qty) > 0 ? ch.getNetPnl() / (premRisk * qty) : 0;
         agg.add(ch.getGrossPnl(), ch.getTotalCharges(), ch.getNetPnl(), rMultiple);
+
+        if (sink != null) {
+            sink.add(BacktestFnoTradeLogEntity.builder()
+                    .strategy(strategy.name())
+                    .symbol(growwOptSymbol)
+                    .underlying(contract.getUnderlying())
+                    .optionType(contract.getOptionType().name())
+                    .strike(contract.getStrike())
+                    .expiry(contract.getExpiry())
+                    .lotSize(contract.getLotSize())
+                    .lots(lots)
+                    .side("BUY")
+                    .entryTime(entryTs)
+                    .entryPrice(entryFill)
+                    .exitTime(candles.get(exitIdx).getTimestamp())
+                    .exitPrice(exitFill)
+                    .premiumStop(round2(premiumStop))
+                    .quantity(qty)
+                    .charges(round2(ch.getTotalCharges()))
+                    .grossPnl(round2(ch.getGrossPnl()))
+                    .pnl(round2(ch.getNetPnl()))
+                    .riskReward(Math.round(rMultiple * 1000.0) / 1000.0)
+                    .exitReason(exitReason)
+                    .build());
+        }
         return exitIdx;
     }
 

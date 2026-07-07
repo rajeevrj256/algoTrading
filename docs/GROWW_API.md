@@ -40,13 +40,24 @@ ceiling we impose on ourselves is:
 | Purpose | Endpoint | Segment | Cached? | Called from |
 |---------|----------|---------|---------|-------------|
 | Daily token exchange | `POST /v1/token/api/access` (checksum) | — | once/day | `GrowwAuthServiceImpl` |
-| Underlying/equity candles | `GET /v1/historical/candle/range` | CASH | **yes**, `datafeed.cache.ttl-seconds` (90s) | `GrowFinanceDataFeedServiceImpl` |
+| Underlying/equity candles | `GET /v1/historical/candles` | CASH | **yes**, `datafeed.cache.ttl-seconds` (90s) | `GrowFinanceDataFeedServiceImpl` |
 | Last price (LTP) | `GET /v1/live-data/ltp?exchange_symbols=…` | CASH / FNO | **no** (always live) | feed + option chain |
-| Option premium candles (backtest) | `GET /v1/historical/candle/range` | FNO | persisted to `fno_candle_history` (async via Kafka) | `GrowwHistoricalService` |
+| Option premium candles (backtest) | `GET /v1/historical/candles` | FNO | persisted to `fno_candle_history` (async via Kafka) | `GrowwHistoricalService` |
 
-> The LTP endpoint's param is `exchange_symbols` (**plural**) — Groww accepts **multiple
-> symbols per call**. We currently send **one symbol per call**; batching is the biggest
-> throughput lever (see §6).
+> **Historical candle params (current API — `/v1/historical/candles`):**
+> `exchange`, `segment` (CASH/FNO), `groww_symbol`, `start_time`, `end_time`, `candle_interval`.
+> - `groww_symbol` is Groww's dash-joined id: `NSE-RELIANCE` / `NSE-NIFTY` (CASH),
+>   `NSE-NIFTY-08Jul25-24500-CE` (FNO option — **case-sensitive**, `ddMMMyy` expiry).
+>   Built by `Symbols.growwCashSymbol` / `Symbols.growwOptionSymbol`.
+> - `start_time` / `end_time` = **epoch seconds** (or `yyyy-MM-dd HH:mm:ss`). Digits-only
+>   seconds avoid RestTemplate double-encoding a space in the datetime form.
+> - `candle_interval` = a token like `5minute` / `1hour` / `1day` (NOT `interval_in_minutes`).
+> - The old `/v1/historical/candle/range` shape (`trading_symbol` + `interval_in_minutes` +
+>   epoch **millis**) was the deprecated SDK-style call — migrated away from it.
+>
+> The LTP endpoint's param is `exchange_symbols` (**plural**, underscore-joined
+> `NSE_RELIANCE`) — Groww accepts **multiple symbols per call**. We currently send **one
+> symbol per call**; batching is the biggest throughput lever (see §6).
 
 ---
 
@@ -158,12 +169,13 @@ toward 429s; change them in small steps and watch for `429` / `Forbidden` in log
 ## 7. Backtest traffic (after hours)
 
 `GrowwHistoricalService` pulls wide windows in **chunks** of
-`backtest.groww.max-days-per-request` (default 25 days) at `interval-minutes` (5), each
-chunk one throttled call. For the F&O backtest it also fetches **one option's premium
-candles per traded signal** (entry day), so request count scales with the number of
-signals × symbols. This runs after hours, so it doesn't compete with the live loop, but
-it is the heaviest Groww consumer — raise `max-days-per-request` to cut call count
-(tradeoff: larger responses, and Groww caps the range per request → **verify** the max).
+`backtest.groww.max-days-per-request` (default **15 days**) at `interval-minutes` (5), each
+chunk one throttled call. **Groww caps 1–5 min candles at 15 days per request** — do NOT
+raise this above 15 for the default 5-min granularity or the call errors (coarser
+intervals allow more: 10–30 min → 90d, hourly+ → 180d). For the F&O backtest it also
+fetches **one option's premium candles per traded signal** (entry day), so request count
+scales with the number of signals × symbols. This runs after hours, so it doesn't compete
+with the live loop, but it is the heaviest Groww consumer.
 
 ---
 
@@ -184,9 +196,15 @@ app:
 
 backtest:
   groww:
-    max-days-per-request: 25       # §7 — chunk size for historical pulls
+    max-days-per-request: 15       # §7 — chunk size; Groww caps 5-min candles at 15d/request
     interval-minutes: 5
 ```
+
+> **Kafka default is OFF** (`app.kafka.enabled: false`). Candle persistence + trade
+> logging + alerts then run as a **direct synchronous DB save** — no broker required.
+> Turn it on ONLY with a broker actually running at `spring.kafka.bootstrap-servers`;
+> enabling it without one makes every publish block on metadata then throw (a backtest
+> returns **HTTP 500** and the logs fill with `Broker may not be available`).
 
 **Bottom line:** with both engines on we generate a **bursty ≤6.7 req/s, low average**
 load that fits comfortably inside Groww's typical limits. To go faster, **batch LTP

@@ -1,4 +1,5 @@
 com/algotrading/service/impl/PaperBrokerServiceImplTest.class
+com/algotrading/util/SymbolsTest.class
 com/algotrading/service/impl/IntradaySymbolServiceImplTest.class
 com/algotrading/service/impl/GrowwOptionChainServiceImplTest.class
 com/algotrading/service/impl/ChargesServiceImplTest.class

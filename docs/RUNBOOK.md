@@ -33,8 +33,9 @@ export GROWW_API_SECRET=your_secret
 ```
 
 Set the datasource in `src/main/resources/application.yml` (`spring.datasource.url /
-username / password`). On first start Flyway runs migrations **V1 → V12** (creates
-`fno_open_position`, `fno_trade_log`, and the `strategy_config.segment` column).
+username / password`). On first start Flyway runs migrations **V1 → V16** — key later
+ones: **V12** parallel engines + `fno_open_position`/`fno_trade_log` + `strategy_config.segment`,
+**V13** `fno_candle_history`, **V15** backtest persistence tables, **V16** `index_candle_history`.
 
 ### Build
 
@@ -242,6 +243,33 @@ suggests.
 **Kill negative-edge strategies:** if a strategy's `avgR` is negative live or in
 backtest, disable it: `POST /api/strategy/config/{type}/disable`.
 
+### 5a. Every run is also saved to the DB
+
+The same run is persisted (best-effort — a DB error never fails the response). Inspect it
+in SQL:
+
+```sql
+-- the run header + per-strategy summary (= the JSON data[])
+SELECT * FROM backtest_run    ORDER BY id DESC LIMIT 5;
+SELECT * FROM backtest_result WHERE run_id = <id>;
+
+-- every simulated trade (entry/exit, side, charges, pnl, R, exit_reason)
+SELECT symbol, side, entry_time, entry_price, exit_time, exit_price, pnl, risk_reward, exit_reason
+  FROM backtest_trade_log      WHERE run_id = <id> ORDER BY entry_time;   -- equity
+SELECT symbol, option_type, strike, lots, entry_price, exit_price, pnl, exit_reason
+  FROM backtest_fno_trade_log  WHERE run_id = <id> ORDER BY entry_time;   -- F&O
+
+-- the OHLC the run used (3 isolated stores)
+SELECT symbol, count(*) FROM candle_history        GROUP BY symbol;   -- equity
+SELECT symbol, count(*) FROM index_candle_history  GROUP BY symbol;   -- index underlying
+SELECT symbol, count(*) FROM fno_candle_history    GROUP BY symbol;   -- option premium (signal-driven)
+```
+
+`exit_reason` ∈ TARGET / STOP_LOSS / TRAIL_STOP / UNDERLYING_STOP / PREMIUM_STOP / EOD /
+RANGE_END. `backtest_fno_trade_log.symbol` is the option `groww_symbol`
+(`NSE-NIFTY-08Jul25-24500-CE`); `fno_candle_history` fills only for contracts a signal
+actually traded.
+
 ---
 
 ## 6. Legacy generic backtest
@@ -252,24 +280,107 @@ no segment filter. Kept for quick checks; prefer `/equity` and `/fno`.
 
 ---
 
-## 7. Troubleshooting
+## 7. Running Kafka locally (Docker Desktop — optional)
+
+Kafka is **off by default** (`app.kafka.enabled: false`) and not required — everything
+falls back to a direct DB save. Turn it on only when a broker is actually running at
+`spring.kafka.bootstrap-servers` (default `localhost:9092`), otherwise every publish stalls
+~60s then fails. With Docker Desktop running, use either option below.
+
+### Option A — one-liner (KRaft, no ZooKeeper)
+
+```bash
+docker run -d --name kafka -p 9092:9092 apache/kafka:3.7.0
+```
+
+The official `apache/kafka` image runs single-node KRaft mode and advertises
+`localhost:9092` out of the box — ready for a host client.
+
+### Option B — docker-compose (recommended; explicit listener)
+
+`docker-compose.yml`:
+```yaml
+services:
+  kafka:
+    image: apache/kafka:3.7.0
+    container_name: kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+```
+```bash
+docker compose up -d
+```
+
+### Turn it on in the app
+
+```yaml
+# application.yml
+app:
+  kafka:
+    enabled: true          # was false
+spring:
+  kafka:
+    bootstrap-servers: localhost:9092
+```
+Restart the app. Topics auto-create on first publish (`auto.create.topics.enable`):
+`algotrading.trade-reporting`, `algotrading.trade-notifications`,
+`algotrading.candle-ingest`, `algotrading.index-candle-ingest`,
+`algotrading.fno-candle-ingest`.
+
+### Verify / operate
+
+```bash
+docker ps                                            # broker up?
+# list topics (exec inside the container)
+docker exec -it kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
+# tail a topic
+docker exec -it kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 --topic algotrading.candle-ingest --from-beginning
+
+docker stop kafka   # stop      (compose: docker compose down)
+docker start kafka  # resume
+```
+App-side confirmation: logs show `[Kafka] Sent to algotrading.… ` instead of the
+`Broker may not be available` warnings. If you stop the broker, candle publishes fall
+back to a direct DB save automatically (reporting/alerts are dropped).
+
+---
+
+## 8. Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| F&O backtest returns high `skipped`, few `trades` | Groww has no historical premium candles for those (expired) option symbols | try recent `days`, liquid indices (NIFTY/BANKNIFTY); this is a data-availability limit, not a bug |
+| Backtest returns **HTTP 500** + logs spam `Broker may not be available` (localhost:9092) | `app.kafka.enabled: true` but **no Kafka broker running** — candle persist blocks then throws into the request | set `app.kafka.enabled: false` (default; direct DB save, no broker needed), or start a broker at `spring.kafka.bootstrap-servers`. NB: this is the **Kafka** broker, not the trading broker |
+| F&O backtest returns high `skipped`, few `trades` | Groww has no historical premium candles for those (expired) option symbols, **or** a wrong `groww_symbol` | try recent `days`, liquid indices (NIFTY/BANKNIFTY); confirm the option `groww_symbol` shape `NSE-NIFTY-08Jul25-24500-CE` (case-sensitive) |
 | Every data call 403 / no candles | Groww **free** plan (no market-data scope) | use the paid plan, or set `app.datafeed.provider: yahoo` (equity/live only; Yahoo has no option data) |
 | Backtest 0 trades | window too short, or strategy disabled/segment mismatch | raise `days`; check `GET /api/strategy/config` (segment + enabled) |
 | Live scan does nothing | off-hours, both engines disabled, or empty watchlist | check IST market hours, `trading.*.enabled`, `GET /api/symbols/resolved` |
 | F&O pass never trades | `fno.enabled=false` or no FNO-segment strategy enabled | enable `fno.enabled` + `trading.fno.enabled`; ensure a strategy has `segment=FNO` |
-| Flyway checksum error on start | an applied migration was edited | never edit `V1..V12`; add a new `V13__*.sql` |
+| Flyway checksum error on start | an applied migration was edited | never edit `V1..V16`; add a new `V17__*.sql` |
+| `fno_candle_history` / `index_candle_history` empty after a run | no signal fired (option store is signal-driven), or index bars only appear once the F&O/live scan fetches them | run `/fno` with `days=30`; check `[Backtest][FNO] … → N trade(s)` (N>0) and `[GrowwHist] ← FNO … M candle(s)` (M>0) |
 
 ---
 
-## 8. Quick reference
+## 9. Quick reference
 
 ```bash
 # BUILD
 mvn clean package -DskipTests
+
+# KAFKA (optional — only if app.kafka.enabled=true; needs Docker Desktop running)
+docker run -d --name kafka -p 9092:9092 apache/kafka:3.7.0   # start local broker (KRaft)
+docker stop kafka                                            # stop
 
 # RUN LIVE (both engines per application.yml)
 java -jar target/algo-trading-monolith-1.0.0.jar
