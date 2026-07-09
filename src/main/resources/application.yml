@@ -107,10 +107,10 @@ groww:
 
 # ── Risk Management ───────────────────────────────────────────
 risk:
-  capital: 100000               # ₹1,00,000 trading capital
-  daily-target: 10000            # Stop trading (protect gains) once today's net profit hits ₹10,000
-  daily-max-loss: 40000          # Circuit breaker: halt trading once today's net loss hits ₹40,000
-  max-trades-per-day: 150
+  capital: 10000000               # ₹1,00,00,000 trading capital
+  daily-target: 100000            # Stop trading (protect gains) once today's net profit hits ₹100,000
+  daily-max-loss: 50000          # Circuit breaker: halt trading once today's net loss hits ₹40,000
+  max-trades-per-day: 25
   min-confidence: 0.70
   min-rr-ratio: 2.1
   risk-per-trade-pct: 0.2       # 0.2% of capital per trade
@@ -132,7 +132,7 @@ risk:
 # The F&O pass also requires fno.enabled below (the option-conversion master switch).
 trading:
   equity:
-    enabled: true
+    enabled: false
   fno:
     enabled: true
 
@@ -141,7 +141,7 @@ fno:
   risk-per-trade-pct: 0.75      # target % of capital risked per option trade (premium risk)
   max-risk-per-trade-pct: 2.5   # hard cap — 1 lot is the minimum position and may exceed the target
   max-lots-per-trade: 4
-  max-premium-per-trade: 30000  # cap on total premium outlay ₹
+  max-premium-per-trade: 300000  # cap on total premium outlay ₹
   premium-hard-stop-pct: 35     # exit if premium drops this % below entry (theta/IV guard)
   itm-offset-steps: 0           # 0 = ATM; 1 = one strike in-the-money (higher delta)
   synthetic-iv: 0.14            # IV for the synthetic pricing fallback
